@@ -3,7 +3,7 @@ name=Geodit
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=Edit your Geodit survey area in QGIS and keep it in sync with the server (project owners, admins and editors).
-version=0.3.4
+version=1.0.0
 author=Antef Tech
 email=anteftech@gmail.com
 about=Requires a Geodit account (https://geodit.in), for project owners, admins and editors. Sign in to Geodit, open a map-based project and work on the features inside the survey area assigned to you. Edits you save in QGIS are uploaded automatically, following the project's Page access, and changes made on the web or in the Android app are downloaded at a configurable interval. Works offline: unsynced edits stay on this computer until the next sync.
@@ -13,10 +13,11 @@ homepage=https://github.com/arshdoda/geodit-qgis-plugin#readme
 category=Vector
 icon=icons/geodit.png
 tags=geodit,survey,sync,field data,collaboration
-experimental=True
+experimental=False
 deprecated=False
 server=False
-changelog=0.3.4 Code clean-ups for the plugins.qgis.org security scan.
+changelog=1.0.0 First stable release: Geodit is no longer experimental, so the plugin manager lists it by default.
+  0.3.4 Code clean-ups for the plugins.qgis.org security scan.
   0.3.2 The sign-in page no longer asks for a server: the plugin always signs in to Geodit.
   0.3.1 Fixed installing from the Geodit plugin repository (QGIS stored the plugin under the wrong folder name).
   0.3.0 Listed in the official QGIS plugin repository (and the Geodit plugin repository); the sign-in server menu offers Production and Custom URL (the Development and Local presets are gone).

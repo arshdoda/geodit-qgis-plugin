@@ -14,11 +14,8 @@ Android app or the web; the server refuses their QGIS sign-in.
 
 ## Install
 
-Geodit is in the official QGIS plugin repository:
-
-1. **Plugins → Manage and Install Plugins… → Settings**, tick **Show also experimental plugins** (Geodit is still
-   marked experimental; QGIS hides it otherwise).
-2. Under **All**, search for **Geodit** and click **Install**. QGIS offers later versions under *Upgradeable*.
+Geodit is in the official QGIS plugin repository: open **Plugins → Manage and Install Plugins…**, search for
+**Geodit** under **All** and click **Install**. QGIS offers later versions under *Upgradeable*.
 
 New versions reach the official repository once a QGIS volunteer approves them, which can take a few days. To get
 them as soon as they're released, also add the Geodit plugin repository: **Settings → Add…**, Name `Geodit`, URL
