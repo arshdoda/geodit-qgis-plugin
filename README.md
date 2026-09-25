@@ -24,7 +24,7 @@ New versions reach the official repository once a QGIS volunteer approves them, 
 them as soon as they're released, also add the Geodit plugin repository: **Settings → Add…**, Name `Geodit`, URL
 `https://arshdoda.github.io/geodit-qgis-plugin/plugins.xml`.
 
-(Or **Install from ZIP** with `geodit-<version>.zip`.)
+(Or **Install from ZIP** with `geodit.<version>.zip`.)
 
 ## Use
 
