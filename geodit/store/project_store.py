@@ -51,7 +51,7 @@ class ProjectStore:
 
     # ----------------------------------------------------------------- meta
     def meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        rows = query(self.ds, f"SELECT value FROM {ddl.META} WHERE key = {sql_str(key)}")
+        rows = query(self.ds, f"SELECT value FROM {ddl.META} WHERE key = {sql_str(key)}")  # nosec B608
         return rows[0]["value"] if rows else default
 
     def meta_json(self, key: str, default):
@@ -69,7 +69,7 @@ class ProjectStore:
                 text = value if isinstance(value, str) else json.dumps(value)
                 exec_sql(
                     self.ds,
-                    f"INSERT INTO {ddl.META} (key, value) VALUES ({sql_str(key)}, {sql_str(text)}) "
+                    f"INSERT INTO {ddl.META} (key, value) VALUES ({sql_str(key)}, {sql_str(text)}) "  # nosec B608
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 )
 
@@ -102,7 +102,7 @@ class ProjectStore:
             int(r["gid_s"]): int(r["sfid"])
             for r in query(
                 self.ds,
-                f"SELECT CAST(fid AS INTEGER) AS sfid, CAST(gd_id AS TEXT) AS gid_s FROM {SURVEY_AREA_TABLE}",
+                f"SELECT CAST(fid AS INTEGER) AS sfid, CAST(gd_id AS TEXT) AS gid_s FROM {SURVEY_AREA_TABLE}",  # nosec B608
             )
             if r["gid_s"] is not None
         }
@@ -150,7 +150,7 @@ class ProjectStore:
                 keep.add(poly.gid)
             gone = [fid for gid, fid in existing.items() if gid not in keep]
             if gone:
-                exec_sql(self.ds, f"DELETE FROM {SURVEY_AREA_TABLE} WHERE fid IN {sql_int_list(gone)}")
+                exec_sql(self.ds, f"DELETE FROM {SURVEY_AREA_TABLE} WHERE fid IN {sql_int_list(gone)}")  # nosec B608
             for key, value in {
                 "sa_colmap": json.dumps(colmap),
                 "sa_keys": json.dumps(list(keys)),
@@ -161,7 +161,7 @@ class ProjectStore:
             }.items():
                 exec_sql(
                     self.ds,
-                    f"INSERT INTO {ddl.META} (key, value) VALUES ({sql_str(key)}, {sql_str(value)}) "
+                    f"INSERT INTO {ddl.META} (key, value) VALUES ({sql_str(key)}, {sql_str(value)}) "  # nosec B608
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 )
         return geometry_changed, True, reshaped

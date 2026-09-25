@@ -38,7 +38,8 @@ EXTENSION_NAME = "geodit_sync"
 EDITED = "gd_edited"
 
 _OGR_MULTI = {1: ogr.wkbMultiPoint, 2: ogr.wkbMultiLineString, 3: ogr.wkbMultiPolygon}
-assert set(_OGR_MULTI) == set(GTYPE_TO_MULTI)
+if set(_OGR_MULTI) != set(GTYPE_TO_MULTI):
+    raise RuntimeError("_OGR_MULTI and GTYPE_TO_MULTI cover different geometry types")
 
 
 def layer_table(shp_id: int) -> str:
@@ -97,7 +98,7 @@ def create_meta(ds, values: Dict[str, str]) -> None:
     exec_sql(ds, f"CREATE TABLE {META} (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     rows = {"_lock": "0", "schema_version": str(SCHEMA_VERSION), **values}
     for key, value in rows.items():
-        exec_sql(ds, f"INSERT INTO {META} (key, value) VALUES ({sql_str(key)}, {sql_str(value)})")
+        exec_sql(ds, f"INSERT INTO {META} (key, value) VALUES ({sql_str(key)}, {sql_str(value)})")  # nosec B608
 
 
 def create_layer_file(path: str, shp_id: int, g_type: int, cols: List[str], meta: Dict[str, str]):
@@ -131,21 +132,21 @@ def create_layer_file(path: str, shp_id: int, g_type: int, cols: List[str], meta
 
 
 def table_columns(ds, table: str) -> Set[str]:
-    rows = query(ds, f"SELECT name FROM pragma_table_info({sql_str(table)})")
+    rows = query(ds, f"SELECT name FROM pragma_table_info({sql_str(table)})")  # nosec B608
     return {r["name"] for r in rows}
 
 
 def upgrade_layer_file(ds) -> None:
     """Bring a layer file written by an older plugin up to ``SCHEMA_VERSION``.
     Idempotent: each step checks before it changes anything."""
-    rows = query(ds, f"SELECT value FROM {META} WHERE key = 'schema_version'")
+    rows = query(ds, f"SELECT value FROM {META} WHERE key = 'schema_version'")  # nosec B608
     if rows and str(rows[0]["value"]) == str(SCHEMA_VERSION):
         return
     if EDITED not in table_columns(ds, BASE):
         exec_sql(ds, f"ALTER TABLE {BASE} ADD COLUMN {EDITED} TEXT")
     exec_sql(
         ds,
-        f"INSERT INTO {META} (key, value) VALUES ('schema_version', {sql_str(str(SCHEMA_VERSION))}) "
+        f"INSERT INTO {META} (key, value) VALUES ('schema_version', {sql_str(str(SCHEMA_VERSION))}) "  # nosec B608
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
 

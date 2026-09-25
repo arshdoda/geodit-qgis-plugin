@@ -700,7 +700,8 @@ class GeoditPlugin:
 
     def _queue(self, reason: str, *, full: bool, discard: bool) -> None:
         """Remember a request made while a sync runs — for this project only."""
-        assert self.project is not None
+        if self.project is None:
+            raise RuntimeError("no project is open")
         queued = self._queued
         if queued is None or queued.project_id != self.project.id:
             queued = self._queued = QueuedSync(self.project.id, reason)

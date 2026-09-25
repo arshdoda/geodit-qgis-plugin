@@ -21,6 +21,7 @@ the sync engine restores deleted features.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import time
@@ -276,7 +277,7 @@ class LayerManager:
             return f"Layer {shp_id}"
 
     def _zoom_to(self, layer: QgsVectorLayer) -> None:
-        try:
+        with contextlib.suppress(Exception):  # a convenience; never break a sync over it
             extent = layer.extent()
             if extent.isNull() or extent.isEmpty():
                 return
@@ -288,8 +289,6 @@ class LayerManager:
             rect.scale(1.1)
             canvas.setExtent(rect)
             canvas.refresh()
-        except Exception:  # noqa: BLE001 - a convenience; never break a sync over it
-            pass
 
     # ---------------------------------------------------------- permissions
     def _apply_edit_policy(self, layer: QgsVectorLayer) -> None:

@@ -72,7 +72,8 @@ class TokenStore:
         with self._lock:
             if self._access is None or self._expires_soon(self._access):
                 self._refresh_locked(refresher)
-            assert self._access is not None
+            if self._access is None:
+                raise RuntimeError("no access token after refreshing")
             return self._access
 
     def force_refresh(self, refresher: Refresher, stale_access: Optional[str]) -> None:

@@ -8,6 +8,7 @@ It is never touched while the plugin loads, only on explicit user actions.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import uuid
 from dataclasses import dataclass
@@ -165,8 +166,6 @@ class SecretStore:
 
     def delete(self, base_url: str) -> None:
         am = QgsApplication.authManager()
-        try:
+        with contextlib.suppress(Exception):  # auth DB unavailable / password refused
             if am.existsAuthSetting(self._key(base_url)):
                 am.removeAuthSetting(self._key(base_url))
-        except Exception:  # noqa: BLE001
-            pass

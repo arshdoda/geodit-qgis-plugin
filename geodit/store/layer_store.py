@@ -158,7 +158,7 @@ class LayerStore:
 
     # ----------------------------------------------------------------- meta
     def meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        rows = query(self.ds, f"SELECT value FROM {ddl.META} WHERE key = {sql_str(key)}")
+        rows = query(self.ds, f"SELECT value FROM {ddl.META} WHERE key = {sql_str(key)}")  # nosec B608
         return rows[0]["value"] if rows else default
 
     def meta_json(self, key: str, default):
@@ -175,7 +175,7 @@ class LayerStore:
             text = value if isinstance(value, str) else json.dumps(value)
             exec_sql(
                 self.ds,
-                f"INSERT INTO {ddl.META} (key, value) VALUES ({sql_str(key)}, {sql_str(text)}) "
+                f"INSERT INTO {ddl.META} (key, value) VALUES ({sql_str(key)}, {sql_str(text)}) "  # nosec B608
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             )
 
@@ -232,7 +232,7 @@ class LayerStore:
             with transaction(self.ds):
                 exec_sql(
                     self.ds,
-                    f"UPDATE {_q(self.table)} SET {_q(col)} = "
+                    f"UPDATE {_q(self.table)} SET {_q(col)} = "  # nosec B608
                     f"(SELECT b.{_q(col)} FROM {ddl.BASE} b WHERE b.fid = {_q(self.table)}.fid)",
                 )
             change.repaired_cols.append(col)
@@ -247,7 +247,7 @@ class LayerStore:
                 values["watermark_ms"] = _opt_int_text(rewind(self.watermark()))
                 # The rewind re-delivers rows whose values for the new keys may
                 # have been dropped: they must be applied again, not skipped.
-                exec_sql(self.ds, f"UPDATE {ddl.BASE} SET {ddl.EDITED} = NULL")
+                exec_sql(self.ds, f"UPDATE {ddl.BASE} SET {ddl.EDITED} = NULL")  # nosec B608
             self.set_meta(values)
         return change
 
@@ -265,7 +265,7 @@ class LayerStore:
             int(r["lfid"])
             for r in query(
                 self.ds,
-                f"SELECT CAST(l.fid AS INTEGER) AS lfid FROM {t} l "
+                f"SELECT CAST(l.fid AS INTEGER) AS lfid FROM {t} l "  # nosec B608
                 f"LEFT JOIN {ddl.BASE} b ON b.fid = l.fid WHERE b.fid IS NULL ORDER BY l.fid",
             )
         ]
@@ -273,7 +273,7 @@ class LayerStore:
             (int(r["bfid"]), int(r["gid_s"]))
             for r in query(
                 self.ds,
-                f"SELECT CAST(b.fid AS INTEGER) AS bfid, CAST(b.gid AS TEXT) AS gid_s "
+                f"SELECT CAST(b.fid AS INTEGER) AS bfid, CAST(b.gid AS TEXT) AS gid_s "  # nosec B608
                 f"FROM {ddl.BASE} b LEFT JOIN {t} l ON l.fid = b.fid WHERE l.fid IS NULL",
             )
         ]
@@ -281,7 +281,7 @@ class LayerStore:
             int(r["lfid"])
             for r in query(
                 self.ds,
-                f"SELECT CAST(l.fid AS INTEGER) AS lfid FROM {t} l JOIN {ddl.BASE} b ON b.fid = l.fid "
+                f"SELECT CAST(l.fid AS INTEGER) AS lfid FROM {t} l JOIN {ddl.BASE} b ON b.fid = l.fid "  # nosec B608
                 f"WHERE {self._changed_predicate('l', 'b', cols)} ORDER BY l.fid",
             )
         ]
@@ -294,7 +294,7 @@ class LayerStore:
             int(r["bfid"])
             for r in query(
                 self.ds,
-                f"SELECT CAST(b.fid AS INTEGER) AS bfid FROM {ddl.BASE} b "
+                f"SELECT CAST(b.fid AS INTEGER) AS bfid FROM {ddl.BASE} b "  # nosec B608
                 f"LEFT JOIN {t} l ON l.fid = b.fid WHERE l.fid IS NULL ORDER BY b.fid",
             )
         ]
@@ -308,7 +308,7 @@ class LayerStore:
                 int(r["lfid"])
                 for r in query(
                     self.ds,
-                    f"SELECT CAST(l.fid AS INTEGER) AS lfid FROM {t} l JOIN {ddl.BASE} b ON b.fid = l.fid "
+                    f"SELECT CAST(l.fid AS INTEGER) AS lfid FROM {t} l JOIN {ddl.BASE} b ON b.fid = l.fid "  # nosec B608
                     f"WHERE l.fid IN {sql_int_list(part)} AND ({self._changed_predicate('l', 'b', cols)})",
                 )
             )
@@ -319,7 +319,7 @@ class LayerStore:
         for part in _chunks(sorted(set(fids))):
             for r in query(
                 self.ds,
-                f"SELECT CAST(fid AS INTEGER) AS bfid, CAST(gid AS TEXT) AS gid_s "
+                f"SELECT CAST(fid AS INTEGER) AS bfid, CAST(gid AS TEXT) AS gid_s "  # nosec B608
                 f"FROM {ddl.BASE} WHERE fid IN {sql_int_list(part)}",
             ):
                 out[int(r["bfid"])] = int(r["gid_s"])
@@ -331,7 +331,7 @@ class LayerStore:
             int(r["mfid"]): (int(r["gid_s"]), bool(r["sent"]))
             for r in query(
                 self.ds,
-                f"SELECT CAST(fid AS INTEGER) AS mfid, CAST(gid AS TEXT) AS gid_s, sent FROM {ddl.MINTED}",
+                f"SELECT CAST(fid AS INTEGER) AS mfid, CAST(gid AS TEXT) AS gid_s, sent FROM {ddl.MINTED}",  # nosec B608
             )
         }
 
@@ -353,7 +353,7 @@ class LayerStore:
                 gid = minter.mint(now_ms())
                 exec_sql(
                     self.ds,
-                    f"INSERT INTO {ddl.MINTED} (fid, gid, sent, minted_at) "
+                    f"INSERT INTO {ddl.MINTED} (fid, gid, sent, minted_at) "  # nosec B608
                     f"VALUES ({int(fid)}, {gid}, 0, {sql_str(stamp)})",
                 )
                 out[int(fid)] = gid
@@ -367,9 +367,9 @@ class LayerStore:
             return
         with transaction(self.ds):
             for part in _chunks(fids):
-                exec_sql(self.ds, f"DELETE FROM {ddl.MINTED} WHERE fid IN {sql_int_list(part)}")
-                exec_sql(self.ds, f"DELETE FROM {ddl.STAGED} WHERE fid IN {sql_int_list(part)}")
-                exec_sql(self.ds, f"DELETE FROM {ddl.PARKED} WHERE fid IN {sql_int_list(part)}")
+                exec_sql(self.ds, f"DELETE FROM {ddl.MINTED} WHERE fid IN {sql_int_list(part)}")  # nosec B608
+                exec_sql(self.ds, f"DELETE FROM {ddl.STAGED} WHERE fid IN {sql_int_list(part)}")  # nosec B608
+                exec_sql(self.ds, f"DELETE FROM {ddl.PARKED} WHERE fid IN {sql_int_list(part)}")  # nosec B608
 
     # --------------------------------------------------------------- staging
     def stage(self, entries: Sequence[Tuple[int, int, str]]) -> None:
@@ -389,7 +389,7 @@ class LayerStore:
                 ops = " ".join(f"WHEN {int(f)} THEN {sql_str(o)}" for f, _, o in part)
                 exec_sql(
                     self.ds,
-                    f"INSERT OR REPLACE INTO {ddl.STAGED} (fid, gid, op, g{col_list}) "
+                    f"INSERT OR REPLACE INTO {ddl.STAGED} (fid, gid, op, g{col_list}) "  # nosec B608
                     f"SELECT l.fid, CASE l.fid {case} END, CASE l.fid {ops} END, l.geom{sel_list} "
                     f"FROM {t} l WHERE l.fid IN {sql_int_list(f for f, _, _ in part)}",
                 )
@@ -397,7 +397,7 @@ class LayerStore:
                 if creates:
                     exec_sql(
                         self.ds,
-                        f"UPDATE {ddl.MINTED} SET sent = 1 WHERE fid IN {sql_int_list(creates)}",
+                        f"UPDATE {ddl.MINTED} SET sent = 1 WHERE fid IN {sql_int_list(creates)}",  # nosec B608
                     )
 
     def staged_rows(self, fids: Iterable[int]) -> Dict[int, StagedRow]:
@@ -407,7 +407,7 @@ class LayerStore:
         for part in _chunks(sorted(set(fids))):
             for r in query(
                 self.ds,
-                f"SELECT CAST(s.fid AS INTEGER) AS sfid, CAST(s.gid AS TEXT) AS gid_s, s.op AS op, "
+                f"SELECT CAST(s.fid AS INTEGER) AS sfid, CAST(s.gid AS TEXT) AS gid_s, s.op AS op, "  # nosec B608
                 f"hex(s.g) AS g_hex{sel} FROM {ddl.STAGED} s WHERE s.fid IN {sql_int_list(part)}",
             ):
                 wkb = None
@@ -432,7 +432,7 @@ class LayerStore:
         for part in _chunks(sorted(set(fids))):
             for r in query(
                 self.ds,
-                f"SELECT CAST(s.fid AS INTEGER) AS sfid, (s.g IS NOT b.g) AS gch{flags} "
+                f"SELECT CAST(s.fid AS INTEGER) AS sfid, (s.g IS NOT b.g) AS gch{flags} "  # nosec B608
                 f"FROM {ddl.STAGED} s JOIN {ddl.BASE} b ON b.fid = s.fid WHERE s.fid IN {sql_int_list(part)}",
             ):
                 keys = [key for i, (key, _) in enumerate(synced) if r.get(f"c_{i}")]
@@ -444,7 +444,7 @@ class LayerStore:
         if fids:
             with transaction(self.ds):
                 for part in _chunks(fids):
-                    exec_sql(self.ds, f"DELETE FROM {ddl.STAGED} WHERE fid IN {sql_int_list(part)}")
+                    exec_sql(self.ds, f"DELETE FROM {ddl.STAGED} WHERE fid IN {sql_int_list(part)}")  # nosec B608
 
     # ---------------------------------------------------------------- parked
     def parked(self) -> Dict[int, dict]:
@@ -452,7 +452,7 @@ class LayerStore:
             int(r["pfid"]): r
             for r in query(
                 self.ds,
-                f"SELECT CAST(fid AS INTEGER) AS pfid, CAST(gid AS TEXT) AS gid_s, kind, error_code, "
+                f"SELECT CAST(fid AS INTEGER) AS pfid, CAST(gid AS TEXT) AS gid_s, kind, error_code, "  # nosec B608
                 f"payload_sha1, detail, at FROM {ddl.PARKED}",
             )
         }
@@ -462,7 +462,7 @@ class LayerStore:
         if fids:
             with transaction(self.ds):
                 for part in _chunks(fids):
-                    exec_sql(self.ds, f"DELETE FROM {ddl.PARKED} WHERE fid IN {sql_int_list(part)}")
+                    exec_sql(self.ds, f"DELETE FROM {ddl.PARKED} WHERE fid IN {sql_int_list(part)}")  # nosec B608
 
     def _park(
         self, fid: int, gid: Optional[int], kind: str, code: Optional[int], sha1: Optional[str], detail: str
@@ -482,13 +482,13 @@ class LayerStore:
         col_list = "".join(f", {_q(c)}" for c in cols)
         exec_sql(
             self.ds,
-            f"INSERT INTO {_q(self.discarded_table)} (geom, gd_id, gd_ans_id{col_list}, discard_reason, discarded_at) "
+            f"INSERT INTO {_q(self.discarded_table)} (geom, gd_id, gd_ans_id{col_list}, discard_reason, discarded_at) "  # nosec B608
             f"SELECT geom, {int(gid) if gid is not None else 'gd_id'}, gd_ans_id{col_list}, {sql_str(reason)}, "
             f"{sql_str(utc_now_iso())} FROM {_q(self.table)} WHERE fid = {int(fid)}",
         )
-        exec_sql(self.ds, f"DELETE FROM {_q(self.table)} WHERE fid = {int(fid)}")
+        exec_sql(self.ds, f"DELETE FROM {_q(self.table)} WHERE fid = {int(fid)}")  # nosec B608
         for table in (ddl.BASE, ddl.STAGED, ddl.MINTED, ddl.PARKED):
-            exec_sql(self.ds, f"DELETE FROM {table} WHERE fid = {int(fid)}")
+            exec_sql(self.ds, f"DELETE FROM {table} WHERE fid = {int(fid)}")  # nosec B608
 
     def _layer_field_names_of(self, table: str) -> Set[str]:
         lyr = self.ds.GetLayerByName(table)
@@ -508,7 +508,7 @@ class LayerStore:
         for part in _chunks(list(fids)):
             exec_sql(
                 self.ds,
-                f"INSERT INTO {ddl.BASE} (fid, gid, g{col_list}) "
+                f"INSERT INTO {ddl.BASE} (fid, gid, g{col_list}) "  # nosec B608
                 f"SELECT s.fid, s.gid, s.g{sel_list} FROM {ddl.STAGED} s WHERE s.fid IN {sql_int_list(part)} "
                 f"ON CONFLICT(fid) DO UPDATE SET {updates}",
             )
@@ -533,7 +533,7 @@ class LayerStore:
             ed_expr = f"CASE l.fid {ed_case} END" if ed_case else "NULL"
             exec_sql(
                 self.ds,
-                f"INSERT INTO {ddl.BASE} (fid, gid, g, {ddl.EDITED}{col_list}) "
+                f"INSERT INTO {ddl.BASE} (fid, gid, g, {ddl.EDITED}{col_list}) "  # nosec B608
                 f"SELECT l.fid, CASE l.fid {case} END, l.geom, {ed_expr}{sel_list} FROM {_q(self.table)} l "
                 f"WHERE l.fid IN {sql_int_list(f for f, _ in part)} "
                 f"ON CONFLICT(fid) DO UPDATE SET {updates}",
@@ -542,7 +542,7 @@ class LayerStore:
     def _set_edited(self, edited_by_fid: Mapping[int, str]) -> None:
         """Record the server ``edited_on`` of rows whose server copy matched ``base``."""
         for fid, value in edited_by_fid.items():
-            exec_sql(self.ds, f"UPDATE {ddl.BASE} SET {ddl.EDITED} = {sql_str(value)} WHERE fid = {int(fid)}")
+            exec_sql(self.ds, f"UPDATE {ddl.BASE} SET {ddl.EDITED} = {sql_str(value)} WHERE fid = {int(fid)}")  # nosec B608
 
     def already_applied(self, rows: Sequence[Mapping]) -> Set[int]:
         """Gids of live ``feat-list`` rows this store already holds exactly as
@@ -560,7 +560,7 @@ class LayerStore:
         for part in _chunks(list(want)):
             for r in query(
                 self.ds,
-                f"SELECT CAST(b.fid AS INTEGER) AS bfid, CAST(b.gid AS TEXT) AS gid_s, b.{ddl.EDITED} AS ed "
+                f"SELECT CAST(b.fid AS INTEGER) AS bfid, CAST(b.gid AS TEXT) AS gid_s, b.{ddl.EDITED} AS ed "  # nosec B608
                 f"FROM {ddl.BASE} b JOIN {t} l ON l.fid = b.fid WHERE b.gid IN {sql_int_list(part)}",
             ):
                 gid = int(r["gid_s"])
@@ -587,11 +587,11 @@ class LayerStore:
                 self._base_from_staged(acked)
                 for part in _chunks(acked):
                     for table in (ddl.MINTED, ddl.PARKED, ddl.STAGED):
-                        exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")
+                        exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")  # nosec B608
             gone = [fid_by_gid[g] for g in buckets.deleted if g in fid_by_gid]
             for part in _chunks(gone):
                 for table in (ddl.BASE, ddl.MINTED, ddl.PARKED, ddl.STAGED):
-                    exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")
+                    exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")  # nosec B608
             for gid in buckets.discard:
                 fid = fid_by_gid.get(gid)
                 if fid is None:
@@ -634,11 +634,11 @@ class LayerStore:
             for part in _chunks(victims):
                 exec_sql(
                     self.ds,
-                    f"INSERT INTO {_q(self.table)} (fid, geom, gd_id{col_list}) "
+                    f"INSERT INTO {_q(self.table)} (fid, geom, gd_id{col_list}) "  # nosec B608
                     f"SELECT b.fid, b.g, b.gid{sel_list} FROM {ddl.BASE} b WHERE b.fid IN {sql_int_list(part)}",
                 )
                 for table in (ddl.STAGED, ddl.PARKED):
-                    exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")
+                    exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")  # nosec B608
         return len(victims)
 
     def revert_local(self, reason: str) -> Tuple[int, int, int]:
@@ -661,21 +661,21 @@ class LayerStore:
             keep_list = "".join(f", {_q(c)}" for c in keep)
             keep_sel = "".join(f", l.{_q(c)}" for c in keep)
             sets = ", ".join(
-                [f"geom = (SELECT b.g FROM {ddl.BASE} b WHERE b.fid = {t}.fid)"]
-                + [f"{_q(c)} = (SELECT b.{_q(c)} FROM {ddl.BASE} b WHERE b.fid = {t}.fid)" for c in cols]
+                [f"geom = (SELECT b.g FROM {ddl.BASE} b WHERE b.fid = {t}.fid)"]  # nosec B608
+                + [f"{_q(c)} = (SELECT b.{_q(c)} FROM {ddl.BASE} b WHERE b.fid = {t}.fid)" for c in cols]  # nosec B608
             )
             with transaction(self.ds):
                 for part in _chunks(changed):
                     exec_sql(
                         self.ds,
-                        f"INSERT INTO {_q(self.discarded_table)} "
+                        f"INSERT INTO {_q(self.discarded_table)} "  # nosec B608
                         f"(geom, gd_id, gd_ans_id{keep_list}, discard_reason, discarded_at) "
                         f"SELECT l.geom, b.gid, l.gd_ans_id{keep_sel}, {sql_str(reason)}, {sql_str(utc_now_iso())} "
                         f"FROM {t} l JOIN {ddl.BASE} b ON b.fid = l.fid WHERE l.fid IN {sql_int_list(part)}",
                     )
-                    exec_sql(self.ds, f"UPDATE {t} SET {sets} WHERE fid IN {sql_int_list(part)}")
+                    exec_sql(self.ds, f"UPDATE {t} SET {sets} WHERE fid IN {sql_int_list(part)}")  # nosec B608
                     for table in (ddl.STAGED, ddl.PARKED):
-                        exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")
+                        exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")  # nosec B608
         if new:
             with transaction(self.ds):
                 for fid in new:
@@ -724,7 +724,7 @@ class LayerStore:
         for part in _chunks(gids):
             for r in query(
                 self.ds,
-                f"SELECT CAST(b.fid AS INTEGER) AS bfid, CAST(b.gid AS TEXT) AS gid_s, hex(b.g) AS g_hex{sel} "
+                f"SELECT CAST(b.fid AS INTEGER) AS bfid, CAST(b.gid AS TEXT) AS gid_s, hex(b.g) AS g_hex{sel} "  # nosec B608
                 f"FROM {ddl.BASE} b WHERE b.gid IN {sql_int_list(part)}",
             ):
                 base[int(r["gid_s"])] = r
@@ -734,7 +734,7 @@ class LayerStore:
         for part in _chunks(local_fids):
             for r in query(
                 self.ds,
-                f"SELECT CAST(fid AS INTEGER) AS lfid, CAST(gd_id AS TEXT) AS gd_s, "
+                f"SELECT CAST(fid AS INTEGER) AS lfid, CAST(gd_id AS TEXT) AS gd_s, "  # nosec B608
                 f"CAST(gd_ans_id AS TEXT) AS ga_s FROM {t} WHERE fid IN {sql_int_list(part)}",
             ):
                 present[int(r["lfid"])] = r
@@ -761,10 +761,10 @@ class LayerStore:
                                 self._discard_row(fid, gid, "Deleted on the server")
                                 out.discarded += 1
                                 continue
-                            exec_sql(self.ds, f"DELETE FROM {t} WHERE fid = {fid}")
+                            exec_sql(self.ds, f"DELETE FROM {t} WHERE fid = {fid}")  # nosec B608
                             out.deleted += 1
                         for table in (ddl.BASE, ddl.STAGED, ddl.PARKED):
-                            exec_sql(self.ds, f"DELETE FROM {table} WHERE fid = {fid}")
+                            exec_sql(self.ds, f"DELETE FROM {table} WHERE fid = {fid}")  # nosec B608
                         continue
                     if fid not in present:
                         out.kept_local += 1  # deleted locally: our delete goes out
@@ -789,7 +789,7 @@ class LayerStore:
                         if fid in present:
                             self._discard_row(fid, gid, "Deleted on the server")
                             out.discarded += 1
-                        exec_sql(self.ds, f"DELETE FROM {ddl.MINTED} WHERE fid = {fid}")
+                        exec_sql(self.ds, f"DELETE FROM {ddl.MINTED} WHERE fid = {fid}")  # nosec B608
                         continue
                     confirm.append(fid)  # our create, whose ok response was lost
                     if fid in present:
@@ -807,7 +807,7 @@ class LayerStore:
                     int(r["sfid"])
                     for r in query(
                         self.ds,
-                        f"SELECT CAST(fid AS INTEGER) AS sfid FROM {ddl.STAGED} WHERE fid IN {sql_int_list(confirm)}",
+                        f"SELECT CAST(fid AS INTEGER) AS sfid FROM {ddl.STAGED} WHERE fid IN {sql_int_list(confirm)}",  # nosec B608
                     )
                 }
                 if staged:
@@ -816,7 +816,7 @@ class LayerStore:
                 gid_of = {fid: gid for gid, fid in minted.items()}
                 self._base_from_layer({fid: gid_of[fid] for fid in confirm if fid not in staged and fid in present})
                 for table in (ddl.MINTED, ddl.STAGED):
-                    exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(confirm)}")
+                    exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(confirm)}")  # nosec B608
             self._base_from_layer(rebase, edited)
             self._set_edited(same)
         return out
@@ -830,7 +830,7 @@ class LayerStore:
             return 0
         exec_sql(
             self.ds,
-            f"UPDATE {_q(self.table)} SET gd_id = {int(gid)}, "
+            f"UPDATE {_q(self.table)} SET gd_id = {int(gid)}, "  # nosec B608
             f"gd_ans_id = {int(ans_id) if ans_id is not None else 'NULL'} WHERE fid = {int(fid)}",
         )
         return 1
@@ -917,7 +917,7 @@ class LayerStore:
             (int(r["lfid"]), int(r["gid_s"]))
             for r in query(
                 self.ds,
-                f"SELECT CAST(l.fid AS INTEGER) AS lfid, CAST(b.gid AS TEXT) AS gid_s "
+                f"SELECT CAST(l.fid AS INTEGER) AS lfid, CAST(b.gid AS TEXT) AS gid_s "  # nosec B608
                 f"FROM {t} l JOIN {ddl.BASE} b ON b.fid = l.fid",
             )
         ]
@@ -926,13 +926,13 @@ class LayerStore:
         if victims:
             with transaction(self.ds):
                 for part in _chunks(victims):
-                    exec_sql(self.ds, f"DELETE FROM {t} WHERE fid IN {sql_int_list(part)}")
+                    exec_sql(self.ds, f"DELETE FROM {t} WHERE fid IN {sql_int_list(part)}")  # nosec B608
                     for table in (ddl.BASE, ddl.STAGED, ddl.PARKED):
-                        exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")
+                        exec_sql(self.ds, f"DELETE FROM {table} WHERE fid IN {sql_int_list(part)}")  # nosec B608
         return len(victims)
 
     def discarded_count(self) -> int:
-        rows = query(self.ds, f"SELECT COUNT(*) AS n FROM {_q(self.discarded_table)}")
+        rows = query(self.ds, f"SELECT COUNT(*) AS n FROM {_q(self.discarded_table)}")  # nosec B608
         return int(rows[0]["n"]) if rows else 0
 
 

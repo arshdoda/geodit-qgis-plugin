@@ -18,6 +18,7 @@ Mirrors the Android client (geodit-mobile-v3 ``SyncFeaturesUseCase`` /
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 import traceback
@@ -138,10 +139,8 @@ class SyncEngine:
             raise Canceled()
 
     def _emit(self, event: LayerEvent) -> None:
-        try:
+        with contextlib.suppress(Exception):  # a display hook must never break a sync
             self._on_event(event)
-        except Exception:  # noqa: BLE001 - a display hook must never break a sync
-            pass
 
     # ------------------------------------------------------------------ tick
     def _tick(self, report: SyncReport) -> None:
@@ -199,7 +198,8 @@ class SyncEngine:
                 layer_report.pull_skipped_unsaved = True
                 continue
             if assigned is not None:  # None: no area assigned — keep what we have, pull nothing
-                assert survey_area is not None
+                if survey_area is None:
+                    raise RuntimeError("survey area missing while an area is assigned")
                 self._pull_layer(info, store, survey_area.id, assigned, reshaped, layer_report)
                 if geometry_changed and not layer_report.created:
                     layer_report.pruned = store.prune_outside(fence)
@@ -321,7 +321,8 @@ class SyncEngine:
         resumes incrementally). Returns ``(fence, geometry_changed, assigned,
         reshaped)``; ``assigned`` is ``None`` while blocked."""
         project = self._project
-        assert project is not None
+        if project is None:
+            raise RuntimeError("no project store is open")
         polys: List[SurveyPolygon] = []
         if sa is None:
             report.no_survey_area = True
@@ -331,7 +332,8 @@ class SyncEngine:
         if not polys:
             report.area_blocked = True
             return project.fence(), False, None, set()
-        assert sa is not None
+        if sa is None:
+            raise RuntimeError("survey-area layer missing while polygons were read")
         geometry_changed, anything_changed, reshaped = project.replace_survey_area(polys, sa.attr_keys)
         report.survey_area_changed = anything_changed
         return project.fence(), geometry_changed, [p.gid for p in polys], reshaped

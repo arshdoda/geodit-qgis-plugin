@@ -165,7 +165,7 @@ def transaction(ds) -> Iterator[None]:
     if err not in (0, None):
         raise StoreError(_last_error("cannot start transaction"))
     try:
-        exec_sql(ds, f"UPDATE {META_TABLE} SET value = value WHERE key = '_lock'")
+        exec_sql(ds, f"UPDATE {META_TABLE} SET value = value WHERE key = '_lock'")  # nosec B608
         yield
     except BaseException:
         with quiet_gdal():
@@ -186,7 +186,8 @@ def transaction(ds) -> Iterator[None]:
 # ---------------------------------------------------------------- SQL literals
 # GDAL's ExecuteSQL has no parameter binding. Only integers, ISO timestamps,
 # hex and our own (escaped) identifiers/strings are ever interpolated; user
-# attribute values move between tables through INSERT … SELECT only.
+# attribute values move between tables through INSERT … SELECT only. That is
+# why the f-string statements in geodit/store are marked "# nosec B608".
 
 
 def sql_int_list(values: Iterable[int]) -> str:
