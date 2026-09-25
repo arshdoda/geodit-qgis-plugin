@@ -1,0 +1,23 @@
+[general]
+name=Geodit
+qgisMinimumVersion=3.40
+qgisMaximumVersion=4.99
+description=Edit your Geodit survey area in QGIS and keep it in sync with the server (project owners, admins and editors).
+version=0.3.0
+author=Antef Tech
+email=anteftech@gmail.com
+about=Requires a Geodit account (https://geodit.in), for project owners, admins and editors. Sign in to Geodit, open a map-based project and work on the features inside the survey area assigned to you. Edits you save in QGIS are uploaded automatically, following the project's Page access, and changes made on the web or in the Android app are downloaded at a configurable interval. Works offline: unsynced edits stay on this computer until the next sync.
+tracker=https://github.com/arshdoda/geodit-qgis-plugin/issues
+repository=https://github.com/arshdoda/geodit-qgis-plugin
+homepage=https://github.com/arshdoda/geodit-qgis-plugin#readme
+category=Vector
+icon=icons/geodit.png
+tags=geodit,survey,sync,field data,collaboration
+experimental=True
+deprecated=False
+server=False
+changelog=0.3.0 Listed in the official QGIS plugin repository (and the Geodit plugin repository); the sign-in server menu offers Production and Custom URL (the Development and Local presets are gone).
+  0.2.2 Fixed features disappearing when zooming in (and layers sometimes showing nothing): the plugin no longer switches its GeoPackages to WAL journaling under QGIS.
+  0.2.1 Projects without a survey area assigned to you are listed but can't be opened; a project whose area is unassigned while open turns read-only and still uploads saved changes; features partly inside your survey area sync; downloads every minute and uploads 3 s after saving; layers show as each downloads and the map moves to your area; a save no longer waits out a retry pause; switching projects during a sync no longer skips the new project's first sync; redrawn survey-area polygons are downloaded again; layers with attributes named G, gid or op sync; smoother panel (no field refresh or flicker every sync); per-sync timings in the log.
+  0.2.0 Only project owners, admins and editors can sign in; expired projects are hidden; editing follows the project's Page access (view only / no delete); only features inside your survey area sync, with an error while drawing outside it; Discard unsynced changes; a redesigned panel (light and dark).
+  0.1.0 First release: sign in (incl. two-factor), map project list, survey-area download, automatic two-way sync (last write wins).
