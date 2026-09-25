@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plugins>
+  <pyqgis_plugin name="Geodit" version="0.3.0" plugin_id="geodit">
+    <description><![CDATA[Edit your Geodit survey area in QGIS and keep it in sync with the server (project owners, admins and editors).]]></description>
+    <about><![CDATA[Requires a Geodit account (https://geodit.in), for project owners, admins and editors. Sign in to Geodit, open a map-based project and work on the features inside the survey area assigned to you. Edits you save in QGIS are uploaded automatically, following the project's Page access, and changes made on the web or in the Android app are downloaded at a configurable interval. Works offline: unsynced edits stay on this computer until the next sync.]]></about>
+    <version>0.3.0</version>
+    <qgis_minimum_version>3.40</qgis_minimum_version>
+    <qgis_maximum_version>4.99</qgis_maximum_version>
+    <homepage>https://github.com/arshdoda/geodit-qgis-plugin#readme</homepage>
+    <file_name>geodit-0.3.0.zip</file_name>
+    <icon>https://arshdoda.github.io/geodit-qgis-plugin/geodit.png</icon>
+    <author_name>Antef Tech</author_name>
+    <download_url>https://arshdoda.github.io/geodit-qgis-plugin/geodit-0.3.0.zip</download_url>
+    <uploaded_by>Antef Tech</uploaded_by>
+    <create_date>2026-09-25</create_date>
+    <update_date>2026-09-25</update_date>
+    <experimental>True</experimental>
+    <deprecated>False</deprecated>
+    <tracker>https://github.com/arshdoda/geodit-qgis-plugin/issues</tracker>
+    <repository>https://github.com/arshdoda/geodit-qgis-plugin</repository>
+    <tags>geodit,survey,sync,field data,collaboration</tags>
+    <server>False</server>
+  </pyqgis_plugin>
+</plugins>
