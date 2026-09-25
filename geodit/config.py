@@ -18,9 +18,11 @@ from qgis.PyQt.QtCore import QStandardPaths
 
 from .store.paths import server_key
 
-PRESETS = {
-    "prod": ("Production", "https://prod.api.geodit.in/api/v2/"),
-}
+SERVER_URL = "https://prod.api.geodit.in/api/v2/"
+# Points the plugin at another Geodit API (development, tests). There is no
+# server choice in the UI; set this in the environment, e.g. QGIS Settings →
+# Options → System → Environment.
+SERVER_URL_ENV = "GEODIT_SERVER_URL"
 # Downloads (web and Android edits) every minute; an idle tick is a handful of
 # cheap, unthrottled map calls. Uploads also start a few seconds after a save.
 DEFAULT_INTERVAL_MIN = 1
@@ -49,24 +51,13 @@ class Config:
 
     # ---------------------------------------------------------------- server
     @property
-    def server_preset(self) -> str:
-        return str(self._get("server/preset", "prod"))
-
-    @property
-    def custom_url(self) -> str:
-        return str(self._get("server/custom_url", ""))
-
-    def set_server(self, preset: str, custom_url: str = "") -> None:
-        self._set("server/preset", preset)
-        self._set("server/custom_url", custom_url)
-
-    @property
     def base_url(self) -> str:
-        preset = self.server_preset
-        if preset == "custom" and self.custom_url:
-            url = self.custom_url.strip()
-            return url if url.endswith("/") else url + "/"
-        return PRESETS.get(preset, PRESETS["prod"])[1]
+        """The Geodit API. Server choices saved by versions before 0.3.2
+        (``server/preset``, ``server/custom_url``) are ignored."""
+        url = os.environ.get(SERVER_URL_ENV, "").strip()
+        if not url:
+            return SERVER_URL
+        return url if url.endswith("/") else url + "/"
 
     # ------------------------------------------------------------------ sync
     @property

@@ -41,7 +41,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from ..config import PRESETS, RememberedUser
+from ..config import RememberedUser
 from ..core.projects import HiddenCounts, ProjectInfo
 from ..sync.context import SyncReport
 from .theme import Theme, device_scale, font, line_icon, logo_pixmap, role_tone, stylesheet
@@ -164,7 +164,6 @@ class GeoditDock(QDockWidget):
         self._theming = False
         self._projects: List[ProjectInfo] = []
         self._user_label = ""
-        self._preset = "prod"
         self._state = "idle"
         self._icon_buttons: List[Tuple[QToolButton, str, int]] = []  # (button, icon name, size)
         self._area_blocked = False
@@ -316,41 +315,8 @@ class GeoditDock(QDockWidget):
         layout.addWidget(self.sign_in_error)
         layout.addStretch(1)
 
-        server_row = QHBoxLayout()
-        server_row.setSpacing(4)
-        server_row.addWidget(label("Server:", kind="muted", wrap=False))
-        self.server_btn = _tool("link", "Choose the Geodit server")
-        self.server_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self.server_btn)
-        for key, (text, url) in PRESETS.items():
-            action = menu.addAction(text)
-            action.setToolTip(url)
-            action.triggered.connect(lambda _checked=False, k=key: self._set_preset(k))
-        menu.addSeparator()
-        custom = menu.addAction("Custom URL…")
-        custom.triggered.connect(lambda _checked=False: self._set_preset("custom", focus=True))
-        self.server_btn.setMenu(menu)
-        server_row.addWidget(self.server_btn)
-        server_row.addStretch(1)
-        layout.addLayout(server_row)
-        self.custom_url = _field("https://…/api/v2/")
-        layout.addWidget(self.custom_url)
-
         self._id_kind_changed()
-        self._set_preset("prod")
         return page
-
-    def _set_preset(self, key: str, focus: bool = False) -> None:
-        self._preset = key if key == "custom" or key in PRESETS else "prod"
-        self.server_btn.setText(self._server_label() + "  ▾")
-        self.custom_url.setVisible(self._preset == "custom")
-        if focus:
-            self.custom_url.setFocus()
-
-    def _server_label(self) -> str:
-        if self._preset == "custom":
-            return "Custom"
-        return PRESETS.get(self._preset, PRESETS["prod"])[0]
 
     def _id_kind_changed(self, *_args) -> None:
         phone = self.id_kind.value() == "phone"
@@ -361,8 +327,6 @@ class GeoditDock(QDockWidget):
         self.sign_in_error.set_message("")
         phone = self.id_kind.value() == "phone"
         self.c.sign_in(
-            preset=self._preset,
-            custom_url=self.custom_url.text().strip(),
             username=None if phone else self.username.text().strip(),
             phone=self.phone.text().strip() if phone else None,
             country_code=self.country_code.text().strip() or "+91",
@@ -704,18 +668,14 @@ class GeoditDock(QDockWidget):
         self.access_icon.setVisible(self._area_blocked or not project.can_edit)
 
     # ================================================================ API
-    def show_sign_in(
-        self, remembered: Optional[RememberedUser] = None, error: str = "", preset: str = "prod", custom_url: str = ""
-    ) -> None:
-        self._set_preset(preset)
-        self.custom_url.setText(custom_url)
+    def show_sign_in(self, remembered: Optional[RememberedUser] = None, error: str = "") -> None:
         self.password.clear()
         self.remembered_box.setVisible(remembered is not None)
         if remembered is not None:
             name = remembered.display_name or f"user {remembered.user_id}"
             self.remembered_label.setText(name)
             self.remembered_avatar.set_name(name)
-            self.remembered_server.setText(f"Signed in on {self._server_label()}")
+            self.remembered_server.setText("Signed in on this computer")
         self.set_sign_in_error(error)
         self.set_busy(False)
         self.stack.setCurrentIndex(PAGE_SIGN_IN)

@@ -30,7 +30,7 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
 
 1. Click the **Geodit** toolbar button to open the Geodit panel.
 2. **Sign in.**
-   - Pick the server and enter your username (or phone number) and password.
+   - Enter your username (or phone number) and password.
    - If your account uses two-factor authentication, you'll be asked for the 6-digit code (or a backup code).
    - "Stay signed in" keeps you signed in for up to 30 days. The sign-in is stored in QGIS's encrypted
      password store, which may ask for the QGIS master password.

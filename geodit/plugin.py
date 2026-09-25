@@ -204,12 +204,7 @@ class GeoditPlugin:
     def _show_signed_out(self, error: str = "") -> None:
         if self.dock is None:
             return
-        self.dock.show_sign_in(
-            self.config.remembered(self.config.base_url),
-            error,
-            preset=self.config.server_preset,
-            custom_url=self.config.custom_url,
-        )
+        self.dock.show_sign_in(self.config.remembered(self.config.base_url), error)
 
     def _show_projects(self, error: str = "") -> None:
         if self.dock is not None:
@@ -225,14 +220,10 @@ class GeoditPlugin:
         return task.step_text if task is not None else ""
 
     # ============================================================ sign in
-    def sign_in(self, *, preset, custom_url, username, phone, country_code, password, remember) -> None:
+    def sign_in(self, *, username, phone, country_code, password, remember) -> None:
         if not password or not (username or phone):
             self.dock.set_sign_in_error("Enter your username (or phone number) and password.")
             return
-        if preset == "custom" and not custom_url.startswith(("http://", "https://")):
-            self.dock.set_sign_in_error("Enter the server URL, e.g. https://example.com/api/v2/")
-            return
-        self.config.set_server(preset, custom_url)
         self._new_session()
         self.remember = remember
         self.dock.set_busy(True)
@@ -307,7 +298,6 @@ class GeoditPlugin:
     def continue_session(self) -> None:
         """Resume a "Stay signed in" session. Reading the stored token can show
         QGIS's master-password prompt, so it only happens on this click."""
-        self.config.set_server(self.config.server_preset, self.config.custom_url)
         self._new_session()
         refresh = self.secrets.load(self.base_url)
         if not refresh:
