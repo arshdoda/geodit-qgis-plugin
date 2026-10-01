@@ -92,6 +92,16 @@ class Config:
     def data_root(self, value: str) -> None:
         self._set("data/root", value or "")
 
+    # ---------------------------------------------------------- feature form
+    @property
+    def form_geometry(self) -> str:
+        """The feature form window's size and position (``saveGeometry`` as base64 text)."""
+        return str(self._get("form/geometry", "") or "")
+
+    @form_geometry.setter
+    def form_geometry(self, value: str) -> None:
+        self._set("form/geometry", value or "")
+
     # --------------------------------------------------------- per install
     @property
     def install_uuid(self) -> str:

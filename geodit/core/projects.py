@@ -15,6 +15,11 @@ and whether a survey-area polygon is assigned to the caller
 polygons — owners included — so a project without one is listed but can't be
 opened. A server that predates the two flags sends neither: nothing is blocked.
 
+The ``data`` block is what the web answer sheet lets the caller do — the Data
+row of Page access plus the five answer-modal switches — and drives the
+feature form exactly as it drives geodit-ui's map Data sheet (``DataCaps``). A
+server that predates it sends none: the feature form is then view only.
+
 The server answers 403 when the user holds none of the three roles anywhere.
 """
 
@@ -50,6 +55,40 @@ AREA_LABELS = {
 
 
 @dataclass(frozen=True)
+class DataCaps:
+    """The feature form's permissions (api-v2 ``web_access.data_caps``):
+    ``can_view`` — the status / surveyor block; ``can_edit`` — edit, create and
+    set a response's status; the rest are the Web access "Answer modal" switches."""
+
+    can_view: bool = True
+    can_edit: bool = False
+    edit_read_only: bool = False
+    duplicate_entry: bool = False
+    remove_entry: bool = False
+    show_hidden_pages: bool = False
+    show_hidden_questions: bool = False
+
+    @classmethod
+    def parse(cls, raw) -> DataCaps:
+        if not isinstance(raw, Mapping):
+            return cls()  # an older server: view only
+
+        def flag(key: str, default: bool) -> bool:
+            value = raw.get(key)
+            return default if value is None else bool(value)
+
+        return cls(
+            can_view=flag("can_view", True),
+            can_edit=flag("can_edit", False),
+            edit_read_only=flag("edit_read_only", False),
+            duplicate_entry=flag("duplicate_entry", False),
+            remove_entry=flag("remove_entry", False),
+            show_hidden_pages=flag("show_hidden_pages", False),
+            show_hidden_questions=flag("show_hidden_questions", False),
+        )
+
+
+@dataclass(frozen=True)
 class ProjectInfo:
     id: int
     name: str
@@ -62,6 +101,10 @@ class ProjectInfo:
     # ``None``: the server didn't say (it predates the flags) — not a blocker.
     has_survey_area: Optional[bool] = None
     has_assigned_area: Optional[bool] = None
+    data: DataCaps = DataCaps()
+    # The row carried ``data`` (the server resolved Web access). An older server
+    # doesn't send it: the plugin then reads the settings itself (``web_access``).
+    data_known: bool = False
 
     @property
     def role_label(self) -> str:
@@ -105,6 +148,8 @@ class ProjectInfo:
         return "Full access"
 
     def same_access(self, other: ProjectInfo) -> bool:
+        """The Map row is unchanged (the sync's concern; the feature form
+        compares ``data`` itself)."""
         return (self.can_view, self.can_edit, self.can_delete) == (other.can_view, other.can_edit, other.can_delete)
 
 
@@ -167,6 +212,8 @@ def parse_desktop_projects(items: Iterable[Mapping]) -> List[ProjectInfo]:
                 owner_name=str(item.get("owner_name") or ""),
                 has_survey_area=_opt_flag(item, "has_survey_area"),
                 has_assigned_area=_opt_flag(item, "has_assigned_area"),
+                data=DataCaps.parse(item.get("data")),
+                data_known=isinstance(item.get("data"), Mapping),
             )
         )
     # Projects that can't be opened for lack of an assigned area go last.

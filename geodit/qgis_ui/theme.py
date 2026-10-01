@@ -148,6 +148,9 @@ def font(scale: float = 1.0, *, bold: bool = False) -> QFont:
 def stylesheet(t: Theme) -> str:
     on_accent = NAVY
     accent_disabled = _hex(mix(t.surface, t.accent, 0.45))
+    # An "on" tool, as the web's active map tools: a pale orange fill, dark orange text.
+    active_bg = _hex(mix(t.surface, t.accent, 0.30 if t.dark else 0.22))
+    active_border = _hex(mix(t.surface, t.accent, 0.5))
     return f"""
 QLabel[kind="muted"] {{ color: {_hex(t.muted)}; }}
 QLabel[kind="section"] {{ color: {_hex(t.muted)}; }}
@@ -160,7 +163,7 @@ QLineEdit[field="true"] {{
     selection-background-color: {_rgba(t.accent, 0.45)};
 }}
 QLineEdit[field="true"]:focus {{ border: 1px solid {_hex(t.accent)}; }}
-QLineEdit[field="true"]:disabled {{ color: {_hex(t.muted)}; }}
+QLineEdit[field="true"]:disabled {{ color: {_hex(t.muted)}; background: {_hex(mix(t.field, t.window, 0.6))}; }}
 QLineEdit[code="true"] {{ min-height: 40px; }}
 
 QPushButton[variant="secondary"], QPushButton[variant="primary"] {{
@@ -172,6 +175,9 @@ QPushButton[variant="secondary"] {{
 QPushButton[variant="secondary"]:hover {{ background: {_hex(t.hover)}; }}
 QPushButton[variant="secondary"]:pressed {{ background: {_hex(t.selected)}; }}
 QPushButton[variant="secondary"]:disabled {{ color: {_hex(t.muted)}; }}
+QPushButton[variant="secondary"]:checked {{
+    background: {active_bg}; border: 1px solid {active_border}; color: {_hex(t.accent_text)};
+}}
 QPushButton[variant="primary"] {{
     border: 1px solid {_hex(t.accent)}; background: {_hex(t.accent)}; color: {on_accent}; font-weight: 600;
 }}
@@ -209,6 +215,17 @@ QToolButton[segment="first"]:hover:!checked, QToolButton[segment="last"]:hover:!
 QFrame[card="true"] {{ background: {_hex(t.surface)}; border: 1px solid {_hex(t.border)}; border-radius: 8px; }}
 QFrame[divider="true"] {{ background: {_hex(t.border)}; border: none; max-height: 1px; min-height: 1px; }}
 
+QFrame[readout="true"] {{ background: {active_bg}; border: 1px solid {active_border}; border-radius: 8px; }}
+QFrame[readout="true"] QLabel {{ background: transparent; }}
+QFrame[badge="true"] {{
+    background: {_hex(t.surface)}; border: 1px solid {_hex(t.border)}; border-radius: 11px;
+}}
+QFrame[badge="true"] QLabel {{ color: {_hex(t.muted)}; background: transparent; }}
+QToolButton[variant="copy"] {{
+    border: none; background: transparent; padding: 0; color: {_hex(t.muted)};
+}}
+QToolButton[variant="copy"]:hover {{ color: {_hex(t.text)}; }}
+
 QListView[cards="true"] {{ background: transparent; border: none; outline: none; }}
 
 QProgressBar[thin="true"] {{
@@ -241,6 +258,44 @@ _ICONS: Dict[str, str] = {
     "shield": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1'
     'c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
     "lock": '<rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+    # The feature form.
+    "database": '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/>'
+    '<path d="M3 12A9 3 0 0 0 21 12"/>',
+    "image": '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/>'
+    '<path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+    "file": '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>'
+    '<path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+    "audio": '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+    "video": '<path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/>'
+    '<rect x="2" y="6" width="14" height="12" rx="2"/>',
+    "pen": '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 '
+    '.623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>',
+    "pin": '<path d="M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10'
+    'a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/>',
+    "crosshair": '<circle cx="12" cy="12" r="10"/><path d="M22 12h-4"/><path d="M6 12H2"/><path d="M12 6V2"/>'
+    '<path d="M12 22v-4"/>',
+    "x": '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    "tick": '<path d="M20 6 9 17l-5-5"/>',
+    "eye": '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/>'
+    '<circle cx="12" cy="12" r="3"/>',
+    "copy": '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>'
+    '<path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    "eye-off": '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/>'
+    '<path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/>'
+    '<path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/>'
+    '<path d="m2 2 20 20"/>',
+    "star": '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 '
+    ".294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0"
+    "-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 "
+    '.294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',
+    "minus": '<path d="M5 12h14"/>',
+    "plus": '<path d="M5 12h14"/><path d="M12 5v14"/>',
+    "calendar": '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/>'
+    '<path d="M3 10h18"/>',
+    "external": '<path d="M15 3h6v6"/><path d="M10 14 21 3"/>'
+    '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+    "upload": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/>',
+    "chevron-right": '<path d="m9 18 6-6-6-6"/>',
 }
 
 
@@ -262,10 +317,11 @@ def _render_svg(svg: bytes, size: int, scale: float) -> QPixmap:
     return pix
 
 
-def line_icon(name: str, color: QColor, size: int = 16) -> QIcon:
+def line_icon(name: str, color: QColor, size: int = 16, *, filled: bool = False) -> QIcon:
     body = _ICONS[name]
+    fill = color.name() if filled else "none"
     svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="{fill}" '
         f'stroke="{color.name()}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
     ).encode()
     icon = QIcon()

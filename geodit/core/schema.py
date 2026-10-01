@@ -25,6 +25,13 @@ class SurveyAreaInfo:
     attr_keys: Tuple[str, ...]
 
 
+def _opt_id(value) -> Optional[int]:
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _attr_keys(attr_head) -> Tuple[str, ...]:
     if isinstance(attr_head, Mapping):
         return tuple(str(k) for k in attr_head.keys())
@@ -47,7 +54,7 @@ def parse_shp_list(payload: Mapping) -> Tuple[List[LayerInfo], Optional[SurveyAr
                 attr_keys=_attr_keys(item.get("attr_head")),
                 is_active=bool(item.get("is_active", True)),
                 locked=bool(item.get("locked", False)),
-                form_id=item.get("form_id"),
+                form_id=_opt_id(item.get("form_id")),
                 position=int(item.get("position") or 0),
             )
         )

@@ -243,6 +243,8 @@ class SyncEngine:
             if info.g_type not in GTYPE_TO_MULTI:
                 continue  # still ingesting — no feature table yet
             server_ids.add(info.id)
+            with contextlib.suppress(FileNotFoundError):  # listed again: the user's removal no longer applies
+                os.remove(paths.layer_removed_marker(self.folder, info.id))
             layer_report = report.layers.setdefault(info.id, LayerReport(shp_id=info.id, name=info.name))
             store, created = LayerStore.open_or_create(
                 paths.layer_gpkg(self.folder, info.id),
@@ -256,6 +258,11 @@ class SyncEngine:
             layer_report.renamed = not created and store.meta("name") != info.name
             if layer_report.renamed or store.state != STATE_ACTIVE:
                 store.set_meta({"state": STATE_ACTIVE, "name": info.name})
+            # The layer's survey form, for the feature form (a form can be
+            # attached or detached on the web at any time).
+            form_id = "" if info.form_id is None else str(info.form_id)
+            if (store.meta("form_id") or "") != form_id:
+                store.set_meta({"form_id": form_id})
             change = store.reconcile_schema(info.attr_keys, can_alter=info.id not in self.ctx.modified)
             layer_report.schema_changed = change.altered or bool(change.retired_keys)
             layer_report.schema_deferred = change.deferred
@@ -269,6 +276,9 @@ class SyncEngine:
             except ValueError:
                 continue
             if shp_id in server_ids:
+                continue
+            if os.path.exists(paths.layer_removed_marker(self.folder, shp_id)):
+                paths.delete_layer_files(self.folder, shp_id)  # removed by the user; retried while in use
                 continue
             path = paths.layer_gpkg(self.folder, shp_id)
             store = LayerStore(open_gpkg(path), path, shp_id)

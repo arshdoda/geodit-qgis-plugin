@@ -22,6 +22,7 @@ the sync engine restores deleted features.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sqlite3
 import time
@@ -220,7 +221,8 @@ class LayerManager:
                 shp_id = int(name[len("layer_") : -len(".gpkg")])
             except ValueError:
                 continue
-            self._ensure_layer(shp_id)
+            if not self.is_removed(shp_id):
+                self._ensure_layer(shp_id)
 
     def _ensure_survey_area(self) -> bool:
         """Add the survey-area layer if its file exists and it isn't in the
@@ -262,19 +264,140 @@ class LayerManager:
             self._apply_edit_policy(layer)
         return layer, added
 
-    def _layer_name(self, shp_id: int) -> str:
+    def _layer_meta(self, shp_id: int, key: str) -> Optional[str]:
         # Plain sqlite3, not GDAL: this runs on the main thread, where GDAL
         # would bring its per-thread options along.
         path = paths.layer_gpkg(self.folder, shp_id)
+        if not os.path.exists(path):
+            return None
         try:
             con = sqlite3.connect(path, timeout=2)
             try:
-                row = con.execute("SELECT value FROM gpkgext_geodit_meta WHERE key = 'name'").fetchone()
+                row = con.execute("SELECT value FROM gpkgext_geodit_meta WHERE key = ?", (key,)).fetchone()
             finally:
                 con.close()
-            return str(row[0]) if row and row[0] else f"Layer {shp_id}"
+            return str(row[0]) if row and row[0] is not None else None
         except sqlite3.Error:
-            return f"Layer {shp_id}"
+            return None
+
+    def _layer_name(self, shp_id: int) -> str:
+        return self._layer_meta(shp_id, "name") or f"Layer {shp_id}"
+
+    def _server_id(self, shp_id: int, fid: int) -> Optional[int]:
+        """The server id of a local feature the server already has (the sync's
+        ``base`` table), else None. The feature table's ``gd_id`` is only a display
+        copy that copy/paste, split and duplicate carry over verbatim."""
+        path = paths.layer_gpkg(self.folder, shp_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            con = sqlite3.connect(path, timeout=2)
+            try:
+                row = con.execute("SELECT gid FROM gpkgext_geodit_base WHERE fid = ?", (int(fid),)).fetchone()
+            finally:
+                con.close()
+            return int(row[0]) if row and row[0] is not None else None
+        except (sqlite3.Error, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def is_orphaned(layer: QgsVectorLayer) -> bool:
+        """The layer was removed on the server: kept locally, no longer synced."""
+        return layer.customProperty(PROP + "orphaned") == "1"
+
+    def is_removed(self, shp_id: int) -> bool:
+        """The user removed this layer (one the server no longer lists); its
+        files wait to be deleted."""
+        return os.path.exists(paths.layer_removed_marker(self.folder, shp_id))
+
+    def remove_layer(self, shp_id: int) -> bool:
+        """Take a layer the server no longer lists out of QGIS for good, its
+        discarded edits included, and delete its local copy — now if nothing
+        holds the file open, else at the next sync (the marker keeps it out
+        of QGIS until then). False if the marker couldn't be written."""
+        try:
+            with open(paths.layer_removed_marker(self.folder, shp_id), "w", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            self.message(f"Couldn't remove the layer: {exc}", Qgis.MessageLevel.Warning)
+            return False
+        ids = [lyr.id() for lyr in self.project_layers() if str(lyr.customProperty(PROP + "shp_id")) == str(shp_id)]
+        QgsProject.instance().removeMapLayers(ids)
+        return True
+
+    def delete_removed_files(self, shp_id: int) -> bool:
+        """Delete a removed layer's files now; False while they're in use."""
+        return paths.delete_layer_files(self.folder, shp_id)
+
+    def form_layers(self) -> List[Tuple[str, int]]:
+        """The open project's synced layers that are linked to a survey form,
+        as ``(layer name, form id)`` sorted by name."""
+        found = []
+        for layer in self.project_layers(KIND_LAYER):
+            if not layer.isValid() or self.is_orphaned(layer):
+                continue
+            try:
+                shp_id = int(layer.customProperty(PROP + "shp_id"))
+            except (TypeError, ValueError):
+                continue
+            form_id = self.layer_form_id(shp_id)
+            if form_id is not None:
+                found.append((layer.name(), form_id))
+        return sorted(found, key=lambda item: item[0].casefold())
+
+    def layer_form_id(self, shp_id: int) -> Optional[int]:
+        """The layer's survey form, as the last sync saw it (None: no form)."""
+        raw = self._layer_meta(shp_id, "form_id")
+        try:
+            return int(raw) if raw else None
+        except ValueError:
+            return None
+
+    def feature_info(self, layer: QgsVectorLayer, fid: int) -> Optional[dict]:
+        """What the feature form needs of one feature: its layer, server id and
+        response id (as synced), and its attributes under their SERVER keys —
+        the current values, unsaved edits included. ``gd_id`` is None until the
+        server has the feature: a copy pasted from a synced feature carries its
+        ids but is a new feature."""
+        if not self._props_match(layer, KIND_LAYER):
+            return None
+        feature = layer.getFeature(int(fid))
+        if not feature.isValid():
+            return None
+        fields = layer.fields()
+        shp_id = int(layer.customProperty(PROP + "shp_id"))
+
+        def value(name: str):
+            idx = fields.indexOf(name)
+            if idx < 0:
+                return None
+            raw = feature.attribute(idx)
+            return None if _is_null(raw) else raw
+
+        gd_id = self._server_id(shp_id, int(fid))
+        gd_ans_id = value("gd_ans_id") if gd_id is not None else None
+        colmap_raw = self._layer_meta(shp_id, "colmap")
+        try:
+            colmap = json.loads(colmap_raw) if colmap_raw else {}
+        except ValueError:
+            colmap = {}
+        attributes = {}
+        for key, column in colmap.items() if isinstance(colmap, dict) else ():
+            raw = value(str(column))
+            attributes[str(key)] = None if raw is None else str(raw)
+        return {
+            "shp_id": shp_id,
+            "fid": int(fid),
+            "layer_id": layer.id(),
+            "layer_name": layer.name(),
+            "gd_id": int(gd_id) if gd_id is not None else None,
+            "gd_ans_id": int(gd_ans_id) if gd_ans_id is not None else None,
+            "attributes": attributes,
+            "form_id": self.layer_form_id(shp_id),
+            "unsaved_edits": layer.isEditable() and layer.isModified(),
+            "geometry": QgsGeometry(feature.geometry()),
+            "crs": layer.crs(),
+        }
 
     def _zoom_to(self, layer: QgsVectorLayer) -> None:
         with contextlib.suppress(Exception):  # a convenience; never break a sync over it
@@ -296,7 +419,7 @@ class LayerManager:
         ways every time, because QGIS stores the flag in the project file. QGIS
         refuses to change it while the layer is being edited, so that case is
         re-checked when editing stops."""
-        orphaned = layer.customProperty(PROP + "orphaned") == "1"
+        orphaned = self.is_orphaned(layer)
         readonly = orphaned or self.project is None or not self.project.can_edit or self.area_blocked
         if layer.readOnly() == readonly:
             self._readonly_pending.discard(layer.id())

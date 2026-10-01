@@ -1,9 +1,11 @@
 """Where local data lives, and the per-project sync lock.
 
 ``<data root>/geodit/<server key>/<user id>/<project id>/`` holds
-``project.gpkg`` and one ``layer_<shp_id>.gpkg`` per synced layer. The data root
-defaults to Qt's AppLocalDataLocation (never the roaming profile, never a
-network share — SQLite file locking needs a local filesystem).
+``project.gpkg``, one ``layer_<shp_id>.gpkg`` per synced layer, and a
+``layer_<shp_id>.removed`` marker while a layer the user removed waits to be
+deleted. The data root defaults to Qt's AppLocalDataLocation (never the
+roaming profile, never a network share — SQLite file locking needs a local
+filesystem).
 """
 
 from __future__ import annotations
@@ -34,6 +36,28 @@ def project_gpkg(folder: str) -> str:
 
 def layer_gpkg(folder: str, shp_id: int) -> str:
     return os.path.join(folder, f"layer_{int(shp_id)}.gpkg")
+
+
+def layer_removed_marker(folder: str, shp_id: int) -> str:
+    """Present once the user removed a layer the server no longer lists: the
+    plugin stops showing it, and its files are deleted as soon as nothing
+    holds them open."""
+    return os.path.join(folder, f"layer_{int(shp_id)}.removed")
+
+
+def delete_layer_files(folder: str, shp_id: int) -> bool:
+    """Delete a removed layer's GeoPackage (with SQLite's side files), then
+    its marker. False when a file is still in use (Windows keeps open files),
+    so the marker stays and the next sync tries again."""
+    gpkg = layer_gpkg(folder, shp_id)
+    for path in (gpkg, gpkg + "-wal", gpkg + "-shm", gpkg + "-journal", layer_removed_marker(folder, shp_id)):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+    return True
 
 
 class ProjectLock:

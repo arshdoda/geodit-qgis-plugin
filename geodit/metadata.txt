@@ -3,10 +3,10 @@ name=Geodit
 qgisMinimumVersion=3.40
 qgisMaximumVersion=4.99
 description=Edit your Geodit survey area in QGIS and keep it in sync with the server (project owners, admins and editors).
-version=1.0.0
+version=1.1.0
 author=Antef Tech
 email=anteftech@gmail.com
-about=Requires a Geodit account (https://geodit.in), for project owners, admins and editors. Sign in to Geodit, open a map-based project and work on the features inside the survey area assigned to you. Edits you save in QGIS are uploaded automatically, following the project's Page access, and changes made on the web or in the Android app are downloaded at a configurable interval. Works offline: unsynced edits stay on this computer until the next sync.
+about=Requires a Geodit account (https://geodit.in), for project owners, admins and editors. Sign in to Geodit, open a map-based project and work on the features inside the survey area assigned to you. Edits you save in QGIS are uploaded automatically, following the project's Page access, and changes made on the web or in the Android app are downloaded at a configurable interval. Works offline: unsynced edits stay on this computer until the next sync. Turn on Data and click a feature on the map to open its survey response in a separate Feature form window and view, edit or create it, following the project's Web access settings.
 tracker=https://github.com/arshdoda/geodit-qgis-plugin/issues
 repository=https://github.com/arshdoda/geodit-qgis-plugin
 homepage=https://github.com/arshdoda/geodit-qgis-plugin#readme
@@ -16,7 +16,8 @@ tags=geodit,survey,sync,field data,collaboration
 experimental=False
 deprecated=False
 server=False
-changelog=1.0.0 First stable release: Geodit is no longer experimental, so the plugin manager lists it by default.
+changelog=1.1.0 Feature form: click Data in the Geodit panel, as on the web map, then a feature on a Geodit layer, to open its survey response in its own window with the web's header (feature, response, surveyor, verifier, status), a tab per page and Save on every page; while Data is on, the panel lists which layer has which form, and where features of layers with a form overlap, a list lets you pick the one to open, as on the web map. View, edit and change the status of a response, or create one for a feature without; repeating pages, rules, calculated and layer defaults, uniqueness checks and photo / signature / PDF / audio / video uploads work as on the web. What you may see and change follows the project's Settings > Web access exactly as on the web: the Map page for editing and deleting features, the Data page and the answer-sheet switches for the form. A redesigned Geodit panel that uses its full width: projects in one to three columns, one click opens a project; a sync status band tinted by the state that never claims more than it knows; Needs attention under it, only when something does (click a row to zoom); the account menu on every page; a layer removed on the server is listed under Needs attention, where a click removes it from QGIS and from this computer.
+  1.0.0 First stable release: Geodit is no longer experimental, so the plugin manager lists it by default.
   0.3.4 Code clean-ups for the plugins.qgis.org security scan.
   0.3.2 The sign-in page no longer asks for a server: the plugin always signs in to Geodit.
   0.3.1 Fixed installing from the Geodit plugin repository (QGIS stored the plugin under the wrong folder name).

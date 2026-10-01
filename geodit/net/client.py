@@ -22,7 +22,17 @@ from urllib.parse import urlencode
 from ..core.clock import ServerClock
 from ..core.policy import parse_retry_after
 from ..core.schema import cursor_from_next
-from .errors import ApiError, NetworkError, ServerTooOld, SessionExpired, Unauthorized, error_for_status
+from ..forms.unique import UNIQUE_VIOLATION, parse_violated_groups
+from .errors import (
+    ApiError,
+    NetworkError,
+    ServerTooOld,
+    SessionExpired,
+    Unauthorized,
+    ValidationFailed,
+    error_for_status,
+)
+from .multipart import build_multipart
 from .tokens import TokenStore
 from .transport import HttpResponse, Transport
 
@@ -45,6 +55,20 @@ class Page:
 
 def _ids_param(ids: Iterable[int]) -> str:
     return json.dumps([int(i) for i in ids], separators=(",", ":"))
+
+
+def _snowflakes_param(ids: Iterable[int]) -> str:
+    """Answer ids are snowflakes: sent as strings (the route takes either)."""
+    return json.dumps([str(int(i)) for i in ids], separators=(",", ":"))
+
+
+@dataclass
+class UniqueVerdict:
+    """``ans-unique-constraint``: free, or a violation naming the colliding
+    groups (``None`` when the server didn't say which)."""
+
+    ok: bool
+    groups: Optional[List[int]] = None
 
 
 class ApiClient:
@@ -136,6 +160,7 @@ class ApiClient:
             errors=errors,
             retry_after=parse_retry_after(resp.headers.get("retry-after")),
             request_id=resp.headers.get("x-request-id"),
+            body=data,
         )
 
     def _refresh_access(self, refresh_token: str) -> Tuple[str, str]:
@@ -217,6 +242,12 @@ class ApiClient:
             return data["results"]
         return []
 
+    def project_detail(self, proj_id: int) -> dict:
+        """The project as the web reads it: ``survey_settings.web_access`` (the
+        Web access settings, ``null`` when none are set) is what the plugin needs."""
+        data = self.call("GET", f"projects/detail/{int(proj_id)}")
+        return data if isinstance(data, dict) else {}
+
     def projects_desktop(self) -> List[dict]:
         """Map projects where the user is Owner/Admin/Editor, with a fresh
         ``is_expired`` and the Map row of Page access. 403 when the user holds
@@ -290,3 +321,159 @@ class ApiClient:
     def feat_batch(self, proj_id: int, ops: List[dict], feedback=None) -> List[dict]:
         data = self.call("POST", f"map/{proj_id}/mobile/feat-batch", body={"ops": ops}, feedback=feedback)
         return list((data or {}).get("results") or [])
+
+    # ----------------------------------------------------------- answers
+    # The feature form: the WEB answer routes, never `mobile/ans-*` (their
+    # creates need a client-minted id).
+    def form_data(self, proj_id: int, form_id: int) -> dict:
+        return self.call("GET", f"forms/{proj_id}/form-data/{int(form_id)}") or {}
+
+    def forms_list_basic(self, proj_id: int) -> List[dict]:
+        """The project's forms (``{id, name, ...}``) — names for the layers a form is attached to."""
+        return self._as_list(self.call("GET", f"forms/{proj_id}/list-basic"))
+
+    def ans_data_list(self, proj_id: int, form_id: int, ans_ids: Sequence[int]) -> List[dict]:
+        """Stored values of up to 100 responses (``{ques_id, ans_id, page_key, value}``)."""
+        if not ans_ids:
+            return []
+        data = self.call(
+            "GET",
+            f"data/{proj_id}/mobile/ans-data-list",
+            params={"form_id": int(form_id), "ans_ids": _snowflakes_param(ans_ids)},
+        )
+        return self._as_list(data)
+
+    def ans_rows(self, proj_id: int, form_id: int, ans_ids: Sequence[int]) -> List[dict]:
+        """The response rows (status, surveyor, dates) of up to 100 ids — a
+        missing id is deleted, or out of the caller's assigned-data scope."""
+        if not ans_ids:
+            return []
+        data = self.call(
+            "GET",
+            f"data/{proj_id}/mobile/ans-list",
+            params={"form_id": int(form_id), "ans_ids": _snowflakes_param(ans_ids)},
+        )
+        return self._as_list(data)
+
+    def team_list_basic(self, proj_id: int) -> List[dict]:
+        """Every member (owner included) — resolves surveyor / verifier ids."""
+        return self._as_list(self.call("GET", f"team/{proj_id}/list-basic"))
+
+    def latest_id(self, proj_id: int, form_id: int, ques_id: int) -> int:
+        """The highest counter submitted for a unique-id question (0 when none)."""
+        data = self.call("GET", f"data/{proj_id}/latest-id", params={"form_id": int(form_id), "ques_id": int(ques_id)})
+        try:
+            return int((data or {}).get("latest_value") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def ans_create(
+        self, proj_id: int, *, form_id: int, feature_id: int, feature_shp_id: int, answers: List[dict]
+    ) -> dict:
+        """Create a response linked to a feature. ``if_unlinked``: a feature that
+        already links a live response answers 409 (``Conflict.linked_ans_id``)
+        instead of being re-pointed. There is no idempotency key, so a caller
+        must never retry this blindly."""
+        body = {
+            "form_id": int(form_id),
+            "feature_id": str(int(feature_id)),
+            "feature_shp_id": int(feature_shp_id),
+            "answers": answers,
+            "if_unlinked": True,
+        }
+        return self.call("POST", f"data/{proj_id}/ans-create", body=body) or {}
+
+    def ans_update(self, proj_id: int, ans_id: int, *, form_id: int, answers: List[dict], clear: List[dict]) -> dict:
+        body: Dict[str, Any] = {"form_id": int(form_id), "answers": answers}
+        if clear:
+            body["clear"] = clear
+        return self.call("PATCH", f"data/{proj_id}/ans-update/{int(ans_id)}", body=body) or {}
+
+    def ans_status(self, proj_id: int, ans_id: int, *, form_id: int, status: int) -> dict:
+        return (
+            self.call(
+                "PATCH",
+                f"data/{proj_id}/ans-status/{int(ans_id)}",
+                params={"form_id": int(form_id)},
+                body={"status": int(status)},
+            )
+            or {}
+        )
+
+    def ans_unique_constraint(
+        self, proj_id: int, *, form_id: int, items: List[dict], exclude_ans_id: Optional[int] = None
+    ) -> UniqueVerdict:
+        """Probe ONE request's combinations. A 422 whose message says "Unique
+        constraint violated" is a verdict; every other failure raises (the
+        caller fails closed)."""
+        try:
+            self.call(
+                "POST",
+                f"data/{proj_id}/ans-unique-constraint",
+                params={
+                    "form_id": int(form_id),
+                    "exclude_ans_id": str(int(exclude_ans_id)) if exclude_ans_id is not None else None,
+                },
+                body=items,
+            )
+            return UniqueVerdict(ok=True)
+        except ValidationFailed as exc:
+            if UNIQUE_VIOLATION.search(exc.message or ""):
+                return UniqueVerdict(ok=False, groups=parse_violated_groups(exc.body))
+            raise
+
+    # ------------------------------------------------------------- media
+    def media_presign(self, proj_id: int, *, kind: str, file_name: str, content_type: str, size: int) -> dict:
+        """One presigned S3 POST (``{url, fields, key}``) for a file of exactly
+        ``size`` bytes (the web route, as geodit-ui uses it)."""
+        data = self.call(
+            "POST",
+            f"data/{proj_id}/media-presign",
+            body={
+                "uploads": [
+                    {
+                        "client_ref": "0",
+                        "kind": kind,
+                        "file_name": file_name,
+                        "content_type": content_type,
+                        "max_bytes": int(size),
+                    }
+                ]
+            },
+        )
+        uploads = (data or {}).get("uploads") or []
+        if not uploads or not isinstance(uploads[0], Mapping):
+            raise ApiError("The server didn't return an upload slot.")
+        return dict(uploads[0])
+
+    def media_url_by_key(self, proj_id: int, key: str) -> str:
+        """A presigned GET (about 5 minutes) for a stored media key."""
+        data = self.call("GET", f"data/{proj_id}/media-url-by-key", params={"key": key})
+        return str((data or {}).get("url") or "")
+
+    def _raw(self, method: str, url: str, headers: Dict[str, str], body: Optional[bytes], feedback) -> HttpResponse:
+        """A request to an absolute URL (S3) — no Authorization, no client header."""
+        started = time.monotonic()
+        try:
+            return self.transport.request(method, url, headers, body, feedback or self.feedback)
+        finally:
+            self.requests += 1
+            self.request_seconds += time.monotonic() - started
+
+    def s3_post(
+        self, url: str, fields: Mapping[str, str], *, file_name: str, content_type: str, data: bytes, feedback=None
+    ) -> None:
+        body, header = build_multipart(fields, file_name, content_type, data)
+        resp = self._raw("POST", url, {"Content-Type": header}, body, feedback)
+        if resp.status == 0:
+            raise NetworkError(resp.error or "")
+        if resp.status not in (200, 201, 204):
+            raise ApiError(f"Upload to storage failed (HTTP {resp.status}). Please retry.", status=resp.status)
+
+    def fetch_bytes(self, url: str, feedback=None) -> bytes:
+        resp = self._raw("GET", url, {}, None, feedback)
+        if resp.status == 0:
+            raise NetworkError(resp.error or "")
+        if not 200 <= resp.status < 300:
+            raise ApiError(f"Download failed (HTTP {resp.status}).", status=resp.status)
+        return resp.body

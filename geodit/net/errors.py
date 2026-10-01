@@ -7,7 +7,7 @@ the exception class (status), never on message text.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class ApiError(Exception):
@@ -21,6 +21,7 @@ class ApiError(Exception):
         errors: Optional[Dict[str, List[str]]] = None,
         retry_after: Optional[int] = None,
         request_id: Optional[str] = None,
+        body: Any = None,
     ) -> None:
         super().__init__(message or self.__class__.__name__)
         self.message = message or self.default_message()
@@ -29,6 +30,9 @@ class ApiError(Exception):
         self.errors = errors or {}
         self.retry_after = retry_after
         self.request_id = request_id
+        # The decoded JSON body, for the errors that carry more than a message
+        # (a 409's linked `ans_id`, a unique probe's `groups`).
+        self.body = body
 
     def default_message(self) -> str:
         return f"Server error ({self.status})"
@@ -85,8 +89,28 @@ class NotFound(ApiError):
         return "Not found."
 
 
+class Gone(NotFound):
+    """410: deleted — ``ans-update`` on a response deleted on the web answers
+    ``AnswerDeleted``. A ``NotFound``, so every not-found path handles it."""
+
+    status = 410
+
+    def default_message(self) -> str:
+        return "This was deleted."
+
+
 class Conflict(ApiError):
     status = 409
+
+    @property
+    def linked_ans_id(self) -> Optional[int]:
+        """``ans-create`` with ``if_unlinked``: the response the feature already
+        links (``FeatureAlreadyAnswered``)."""
+        raw = self.body.get("ans_id") if isinstance(self.body, dict) else None
+        try:
+            return int(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            return None
 
 
 class ValidationFailed(ApiError):
@@ -114,7 +138,7 @@ class ServerTooOld(ApiError):
     def default_message(self) -> str:
         return (
             "This Geodit server doesn't support this version of the plugin yet. "
-            "Ask your Geodit administrator, or choose another server."
+            "Please try again later, or ask your Geodit administrator."
         )
 
 
@@ -125,6 +149,7 @@ _BY_STATUS = {
     403: PermissionDenied,
     404: NotFound,
     409: Conflict,
+    410: Gone,
     422: ValidationFailed,
     429: RateLimited,
 }
