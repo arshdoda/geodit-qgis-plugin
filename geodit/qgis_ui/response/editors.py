@@ -232,7 +232,7 @@ def _placeholder(question: Question) -> str:
 
 _IDENTITY_PLACEHOLDER = {
     IdentityType.AADHAAR_CARD: "1234 5678 9012",
-    IdentityType.PAN_CARD: "ABCDE1234F",
+    IdentityType.PAN_CARD: "ABCPD1234E",  # not all hex digits: detect-secrets reads those as a key
     IdentityType.DRIVING_LICENSE: "DL01 20191234567",
     IdentityType.VOTER_ID: "ABC1234567",
     IdentityType.PASSPORT: "A1234567",

@@ -223,7 +223,7 @@ def validate_value(question: Question, value: Any, *, read_only_editable: bool =
         if kind == IdentityType.AADHAAR_CARD and not _AADHAAR.fullmatch(_SPACES.sub("", text)):
             return "Enter a valid 12-digit Aadhaar number."
         if kind == IdentityType.PAN_CARD and not _PAN.fullmatch(text.upper()):
-            return "Enter a valid PAN (e.g. ABCDE1234F)."
+            return "Enter a valid PAN (e.g. ABCPD1234E)."
         if kind == IdentityType.VOTER_ID and not _VOTER_ID.fullmatch(text.upper()):
             return "Enter a valid 10-character Voter ID (e.g. ABC1234567)."
         if kind == IdentityType.PASSPORT and not _PASSPORT.fullmatch(text):
