@@ -491,7 +491,9 @@ def _evaluate_separator_expression(expression: str, answers: FlatAnswers, form: 
 
 def collect_calc_ref_ques_ids(question: Question) -> Set[Any]:
     """Question ids a CALCULATE default reads — condition ids plus every ``{N}``
-    ref. Looser than evaluation on purpose (it can only lift a pause early)."""
+    ref. A condition id written as ``"5"`` is question 5, as the evaluator
+    reads it (``_answer_key``). Looser than evaluation on purpose: it can only
+    lift a pause, or release a stored result, early."""
     refs: Set[Any] = set()
     if _default_type(question) != DefaultType.CALCULATE:
         return refs
@@ -511,9 +513,9 @@ def collect_calc_ref_ques_ids(question: Question) -> Set[Any]:
                 if isinstance(conditions, list):
                     for sub in conditions:
                         if isinstance(sub, Mapping) and sub.get("ques_id") is not None:
-                            refs.add(sub["ques_id"])
+                            refs.add(_answer_key(sub["ques_id"]))
                 if row.get("ques_id") is not None:
-                    refs.add(row["ques_id"])
+                    refs.add(_answer_key(row["ques_id"]))
                 refs.update(parse_schema_tokens(_then_text(row)))
             return refs
     refs.update(parse_schema_tokens(trimmed))

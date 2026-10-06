@@ -29,8 +29,15 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
 2. **Sign in.**
    - Enter your username (or phone number) and password.
    - If your account uses two-factor authentication, you'll be asked for the 6-digit code (or a backup code).
-   - "Stay signed in" keeps you signed in for up to 30 days. The sign-in is stored in QGIS's encrypted
-     password store, which may ask for the QGIS master password.
+   - "Stay signed in" keeps you signed in on this computer for up to 30 days. The sign-in is stored in QGIS's
+     encrypted password store, which may ask for the QGIS master password. Without it, closing QGIS signs you
+     out.
+   - Signing in with the form while "Continue as …" shows replaces that remembered sign-in: once the new one
+     works, the old one is signed out on the server. The plugin never asks for the master password just for
+     this, so another account's remembered sign-in is signed out only if the password store is already open
+     (or you tick "Stay signed in"); otherwise it expires on its own.
+   - After too many attempts the server asks you to wait: **Sign in** counts down until you can try that
+     account again.
 3. **Click a map project** to open it. The list shows the map projects you own, or where you are an Admin or
    Editor. Projects whose owner's plan has expired, and projects where the owner has turned the Map page off for
    your role, are hidden (a note under the list says how many and why). A project where **no survey area is
@@ -56,12 +63,17 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
    surveyed the response and when it was last edited, who verified it, its status, and its answers with a tab per
    page. Close the window, or press Esc in it, to close the form.
    - **Edit** the answers and click **Save changes** (Ctrl+S) on any page; every page is checked first, and only
-     the answers you changed are sent. The form stays on the page you were on. A status you pick (Pending /
-     Approved / Rejected) applies at once.
+     the answers you changed are sent, along with any calculated answer the response doesn't have saved yet. The
+     form stays on the page you were on. A status you pick (Pending / Approved / Rejected) applies at once.
    - A feature **without a response** opens a blank form, and submitting creates the response for it. A feature
      you drew in QGIS gets its form once it has uploaded.
    - Repeating pages, rules, calculated and layer defaults, uniqueness checks and photo, signature, PDF, audio
      and video answers work as on the web.
+   - A saved response shows what was saved: typed and layer defaults fill in a new response only, so a question
+     left blank stays blank. A calculated answer is worked out from the answers it uses, and saved even where the
+     response has none; it's worked out again when you change one of them.
+   - In a repeating page, each entry keeps its own ID number when an earlier entry is removed, and an entry you
+     add takes the response's number, the one on entry 1.
    - What you may see and change follows the project's **Web access** settings (Settings → Web access), exactly
      as on the web, for owners, admins and editors alike: the **Map** page decides whether you can edit and delete
      features in the layers, and the **Data** page and the answer-sheet switches decide what you can do in the

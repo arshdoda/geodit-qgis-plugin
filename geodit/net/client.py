@@ -28,7 +28,6 @@ from .errors import (
     NetworkError,
     ServerTooOld,
     SessionExpired,
-    Unauthorized,
     ValidationFailed,
     error_for_status,
 )
@@ -137,15 +136,20 @@ class ApiClient:
         self.clock.observe_date_header(resp.headers.get("date"))
         return resp
 
+    @staticmethod
+    def _json(resp: HttpResponse) -> Any:
+        """The decoded JSON body, ``None`` when there is none or it isn't JSON."""
+        if not resp.body:
+            return None
+        try:
+            return json.loads(resp.body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return None
+
     def _decode(self, resp: HttpResponse) -> Any:
         if resp.status == 0:
             raise NetworkError(resp.error or "")
-        data: Any = None
-        if resp.body:
-            try:
-                data = json.loads(resp.body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                data = None
+        data = self._json(resp)
         if 200 <= resp.status < 300:
             return data
         message, errors = "", None
@@ -169,6 +173,12 @@ class ApiClient:
         body = json.dumps({"refresh": refresh_token}).encode("utf-8")
         resp = self._send("POST", self.url("user/refresh"), body, None, None)
         if resp.status in (400, 401, 403):
+            raise SessionExpired()
+        if resp.status == 404 and isinstance(self._json(resp), dict):
+            # The API's own 404: a server before api-v2 R1 answers it for a
+            # user who no longer exists (now a 401). The account is gone, so
+            # the session is — never a sign of an older server. A proxy's HTML
+            # 404 stays a NotFound.
             raise SessionExpired()
         if resp.status == 422:
             # Only a server that predates the body form answers 422 here (its
@@ -215,14 +225,23 @@ class ApiClient:
         return result
 
     def logout(self) -> None:
+        """End the session on the server, best effort: with no access token
+        (a stored session) it refreshes first, as ``/user/logout`` needs a
+        Bearer. Never raises an API error — it must not replace the error a
+        caller logs out for."""
         refresh = self.tokens.refresh_token
         try:
             if refresh and not self.tokens.is_dead:
                 self.call("POST", "user/logout", body={"refresh": refresh})
-        except (Unauthorized, NetworkError):
-            pass  # already dead / offline: the session simply expires
+        except ApiError:
+            pass  # already dead, offline, throttled: the session simply expires
         finally:
             self.tokens.clear()
+
+    def revoke_session(self, sid: int) -> None:
+        """End one of the signed-in user's own sessions by its id — another
+        session's refresh token isn't needed (``/user/sessions/{sid}``)."""
+        self.call("DELETE", f"user/sessions/{int(sid)}")
 
     def profile(self) -> dict:
         return self.call("GET", "user/profile") or {}

@@ -1,21 +1,25 @@
 """One open feature form: ``FormRenderer``'s state and submit pipeline, without the UI.
 
-Port of geodit-ui ``components/forms/runtime/FormRenderer.tsx`` as the answer
-sheet mounts it (embedded, no draft, no cover screen, PREVIOUS defaults off).
+Port of geodit-ui ``components/forms/runtime/FormRenderer.tsx`` and its save
+payload (``runtime/submitPayload.ts``) as the answer sheet mounts it (embedded,
+no draft, no cover screen, PREVIOUS defaults off).
 The Qt window renders what this object says and forwards every edit to it, so
 the rules, defaults, validation and the save payload are exactly the web's:
 
-* seeding — the stored response, then MANUAL defaults, then SHAPEFILE defaults
-  from the feature's attributes (fill-empty-only, each gated on validation);
+* seeding — the stored response; a NEW response then gets MANUAL defaults,
+  then SHAPEFILE defaults from the feature's attributes (fill-empty-only, each
+  gated on validation), while an update shows only what is stored;
 * ``effective_answers`` — the stored/typed answers overlaid with CALCULATE
   defaults and schema-built unique ids (a multi-pass fixed point; a slot the
-  user typed into, or cleared, is left alone);
+  user typed into, or cleared, is left alone, and a stored one until an input
+  it reads is edited — ``calc_freeze``);
 * presentation — rule-hidden pages / questions / options, plus the author's
   "Visible to surveyor" unless this viewer may see hidden items (then tagged
   and never required);
 * ``prepare_submit`` — validate every tab, check AT_LEAST / UNIQUE, build the
-  payload (update: only the edited slots; ``clear`` for erased slots and for
-  removed repeating-page entries) and the uniqueness groups to probe.
+  payload (update: the edited slots, plus any calculation over a blank stored
+  slot, and each schema-built id's own counter; ``clear`` for erased slots and
+  for removed repeating-page entries) and the uniqueness groups to probe.
 """
 
 from __future__ import annotations
@@ -28,15 +32,18 @@ from .answers import (
     Answers,
     SlotKey,
     TabKey,
+    canonical_choice_order,
     error_key,
     get_answer,
     has_answer,
     is_empty_answer,
+    remap_key_list,
     remap_page_keys,
     same_answer_value,
     set_answer_at,
     tab_key,
 )
+from .calc_freeze import CalcFreezeState, is_calc_frozen, prefilled_slots, unfreeze_stored_calcs
 from .defaults import (
     collect_calc_ref_ques_ids,
     compute_default,
@@ -131,6 +138,17 @@ class SubmitPayload:
         return {error_key(a["ques_id"], a["page_key"]) for a in (*self.answers, *self.clear)}
 
 
+@dataclass(frozen=True)
+class OpenedForm:
+    """What the form held when it opened (the web's ``OpenedForm``)."""
+
+    page_keys: Dict[int, List[int]]  # every page's entries
+    answers: Answers  # the seeded answers
+    # What it showed: ``answers`` plus the CALCULATE / schema-id overlay — the
+    # yardstick for unsaved work (``changed_since_open``).
+    effective: Answers
+
+
 @dataclass
 class PreparedSubmit:
     payload: SubmitPayload
@@ -145,6 +163,35 @@ def _js_strict_eq(a: Any, b: Any) -> bool:
     if a is None and b is None:
         return True
     return a is b
+
+
+def _canonical(question: Question, value: Any) -> Any:
+    """A MULTIPLE_CHOICE list in the order every platform writes (option order,
+    the manual entry last); any other value as it is."""
+    if question.q_type == QType.MULTIPLE_CHOICE and isinstance(value, list):
+        return canonical_choice_order(value, question.opt_list)
+    return value
+
+
+def changed_since_open(effective: Answers, page_keys_by_page_id: Mapping[int, List[int]], opened: OpenedForm) -> bool:
+    """Whether the form differs from what it showed when it opened — the work a
+    close would lose (``changedSinceOpen``). A computed value is the same on
+    every open, so it is no work to lose even when Save would store it; an
+    entry added or removed is. Empty and absent count as the same, so editing a
+    value back makes the form clean again."""
+    for page_id in set(page_keys_by_page_id) | set(opened.page_keys):
+        if sorted(page_keys_by_page_id.get(page_id, [1])) != sorted(opened.page_keys.get(page_id, [1])):
+            return True
+    for ques_id in set(effective) | set(opened.effective):
+        now = effective.get(ques_id) or {}
+        then = opened.effective.get(ques_id) or {}
+        for page_key in set(now) | set(then):
+            a, b = now.get(page_key), then.get(page_key)
+            if is_empty_answer(a) and is_empty_answer(b):
+                continue
+            if is_empty_answer(a) or is_empty_answer(b) or not same_answer_value(a, b):
+                return True
+    return False
 
 
 def _default_type_is(question: Question, kind: int, *, strict: bool = False) -> bool:
@@ -181,31 +228,40 @@ class FormSession:
         self.for_page_ids: Set[int] = compute_for_page_ids(form.rule_list)
         self.unique_target_groups = unique_rule_target_groups(form.rule_list)
         self.calc_refs_by_ques_id = self._calc_refs()
-        # The baseline the update diff compares against: the SEEDED answers.
+        # The baseline the update diff compares against: the STORED answers, as
+        # loaded — never a default. What the form held on top is in `opened`.
         self.submit_baseline: Optional[Answers] = self.initial_answers
         self.effective_for_page_ids = self._effective_for_pages()
 
         self.page_keys_by_page_id: Dict[int, List[int]] = self._seed_page_keys()
-        # The entries the form LOADED with: a removed entry's rows are erased on
-        # save only when the key was here at mount and is gone now.
-        self.mounted_page_keys: Dict[int, List[int]] = copy.deepcopy(self.page_keys_by_page_id)
 
         self._presentation()
         self.answers: Answers = self._build_seed_answers(self.page_keys_by_page_id)
-        # A prefilled stored response counts as typed: its CALCULATE slots are
-        # frozen, so a save never persists a recomputed value over what was stored.
+        # Slots typed into this session: an override no calculation replaces.
         self.user_touched: Set[SlotKey] = set()
-        for ques_id, by_key in (self.initial_answers or {}).items():
-            for page_key in by_key:
-                self.user_touched.add(error_key(ques_id, page_key))
+        # A stored response's slots freeze too, so opening it never rewrites a
+        # calculation, until an input the calculation reads is edited.
+        self.stored_calc_keys: Set[SlotKey] = prefilled_slots(self.initial_answers)
         self.errors: Dict[SlotKey, str] = {}
         self.server_unique_keys: Set[SlotKey] = set()
         self.cleared_calc_keys: Set[SlotKey] = set()
+        # Per repeating page, the keys of entries added this session: on an
+        # update, the only entries a schema-built id counter is given to.
+        self.added_entry_keys: Dict[int, List[int]] = {}
         self.validation_attempted = False
         self.tab_index = 0
         self.rule_submit_error: Optional[str] = None
         self._edited = False
         self._cache: Dict[str, Any] = {}
+        # What the form held when it OPENED: the save erases a stored row only
+        # when the form held it here and no longer does (an entry was removed,
+        # or a removal renumbered another one onto its key); and a close loses
+        # work only where the form differs from what it showed here.
+        self.opened = OpenedForm(
+            copy.deepcopy(self.page_keys_by_page_id),
+            copy.deepcopy(self.answers),
+            copy.deepcopy(self.effective_answers),
+        )
 
     # ================================================================ setup
     def _calc_refs(self) -> Dict[int, Set[Any]]:
@@ -282,6 +338,11 @@ class FormSession:
                 if has_answer(initial, ques_id, page_key):
                     continue
                 initial = set_answer_at(initial, ques_id, page_key, value)
+        # MANUAL and SHAPEFILE defaults pre-fill a NEW response only. An update
+        # shows what is stored: a question left blank stays blank, rather than
+        # showing (and saving) a value that was never stored.
+        if self.options.submit_changed_only:
+            return initial
         # MANUAL defaults for every empty (question, entry).
         for page in self.form.page_list:
             keys = page_keys[page.id] if page.id in page_keys else [1]
@@ -294,7 +355,7 @@ class FormSession:
                     view = flatten_for_calc(initial, self.form, page.id, k)
                     default = compute_default(question, view, self.form)
                     if default is not None:
-                        initial = set_answer_at(initial, question.id, k, default)
+                        initial = set_answer_at(initial, question.id, k, _canonical(question, default))
         # SHAPEFILE defaults from the feature's attributes, fill-empty-only and
         # gated on validation (attribute data has no authoring gate).
         if self.feature_attributes:
@@ -321,8 +382,22 @@ class FormSession:
         self._presentation()
         self._invalidate()
 
-    def _validate(self, question: Question, value: Any) -> Optional[str]:
-        return validate_value(question, value, read_only_editable=self.options.allow_read_only_edit)
+    def _validate(self, question: Question, value: Any, page_key: Optional[int] = None) -> Optional[str]:
+        # The value the response already stores at this slot isn't measured
+        # against the column again (``validate_value``'s ``stored_unchanged``).
+        baseline = self.submit_baseline if self.options.submit_changed_only else None
+        stored_unchanged = (
+            page_key is not None
+            and baseline is not None
+            and has_answer(baseline, question.id, page_key)
+            and same_answer_value(get_answer(baseline, question.id, page_key), value)
+        )
+        return validate_value(
+            question,
+            value,
+            read_only_editable=self.options.allow_read_only_edit,
+            stored_unchanged=stored_unchanged,
+        )
 
     def _invalidate(self) -> None:
         self._cache.clear()
@@ -352,6 +427,7 @@ class FormSession:
             return self.answers
         current = self.answers
         changed = False
+        freeze = CalcFreezeState(self.user_touched, self.stored_calc_keys, self.cleared_calc_keys)
         for _ in range(len(work)):
             pass_changed = False
             # A question hidden by rules is not computed: it stays empty so its
@@ -366,16 +442,18 @@ class FormSession:
             for question, pk, kind in work:
                 if question.id in hidden.get(tab_key(question.page_id, pk), ()):
                     continue
-                slot = error_key(question.id, pk)
-                frozen = (
-                    slot in self.user_touched and not is_empty_answer(get_answer(self.answers, question.id, pk))
-                ) or slot in self.cleared_calc_keys
+                frozen = is_calc_frozen(
+                    freeze, error_key(question.id, pk), not is_empty_answer(get_answer(self.answers, question.id, pk))
+                )
                 if kind != "uniqueId" and frozen:
                     continue
                 view = flatten_for_calc(current, self.form, question.page_id, pk, hidden)
                 if kind == "uniqueId":
-                    stored = unique_value_own(get_answer(self.submit_baseline or {}, question.id, pk))
-                    computed = compute_unique_id(question.attributes, view, self.form, None if stored == "" else stored)
+                    # Around the entry's own counter, which a removal moves with
+                    # it; with none, the form's next number shows (and a create
+                    # saves it). The counter is the one Save stores.
+                    counter = self.entry_counter(question, pk)
+                    computed = compute_unique_id(question.attributes, view, self.form, counter)
                 else:
                     computed = compute_default(question, view, self.form)
                 if computed is None:
@@ -506,6 +584,22 @@ class FormSession:
     def value(self, ques_id: int, page_key: int) -> Any:
         return get_answer(self.effective_answers, ques_id, page_key)
 
+    def entry_counter(self, question: Question, page_key: int) -> Any:
+        """The counter a schema-built id slot carries, which it also shows
+        (``entryCounter``): the entry's own, read from the raw answers that a
+        removal moves with it; for an entry added this session, the response's
+        number — entry 1's counter, as a create gives every entry the same one;
+        otherwise None. An existing entry that never had a counter is never
+        given one, nor is an entry added to a response whose entry 1 has none:
+        the form's ``unique_value`` is only the next number on a create."""
+        own = unique_value_own(get_answer(self.answers, question.id, page_key))
+        if own != "":
+            return own
+        if page_key not in self.added_entry_keys.get(question.page_id, ()):
+            return None
+        first = unique_value_own(get_answer(self.answers, question.id, 1))
+        return None if first == "" else first
+
     def visible_options(self, question: Question, page_key: int) -> List[Option]:
         return visible_options_for(question, self.evaluation, tab_key(question.page_id, page_key))
 
@@ -524,7 +618,7 @@ class FormSession:
         value = self.value(question.id, page_key)
         stored = self.errors.get(error_key(question.id, page_key))
         unstorable = not self.options.read_only and storable_range_error(question, value) is not None
-        return self._validate(question, value) if stored or unstorable else None
+        return self._validate(question, value, page_key) if stored or unstorable else None
 
     def error_count_by_tab(self) -> Dict[TabKey, int]:
         """Stepper badges: fresh validation of every tab BEFORE the current one."""
@@ -533,7 +627,11 @@ class FormSession:
         for i, tab in enumerate(self.tabs):
             if i >= safe:
                 continue
-            n = sum(1 for q in self.tab_questions(tab) if self._validate(q, self.value(q.id, tab.page_key)) is not None)
+            n = sum(
+                1
+                for q in self.tab_questions(tab)
+                if self._validate(q, self.value(q.id, tab.page_key), tab.page_key) is not None
+            )
             if n:
                 out[tab.key] = n
         return out
@@ -661,24 +759,36 @@ class FormSession:
         return self.validation_attempted or self.rule_submit_error_shown
 
     def is_dirty(self) -> bool:
-        """Whether a close would lose something: on an update, a non-empty
-        diff; on a create, any edit at all."""
+        """Whether a close would lose something: what the form shows, or its
+        entries, differ from what it showed when it opened. Not "Save would
+        send something": a calculation over a blank stored slot is saved, but
+        reopening computes it again, so it's no work to lose."""
         if not self._edited:
             return False
-        if self.options.submit_changed_only:
-            return not self.build_payload().is_empty()
-        return True
+        return changed_since_open(self.effective_answers, self.page_keys_by_page_id, self.opened)
 
     # ================================================================ edits
     def set_answer(self, ques_id: int, value: Any, page_key: Optional[int] = None) -> None:
         if page_key is None:
             tab = self.current_tab
             page_key = tab.page_key if tab else 1
+        original = self.ques_by_id.get(ques_id)
+        # A MULTIPLE_CHOICE selection is stored in option order, whatever the
+        # click order, against the full option list so a pick that rules hide
+        # keeps its rank. Only a user edit comes through here, so an untouched
+        # stored value keeps the exact shape the update diff compares.
+        if original is not None:
+            value = _canonical(original, value)
         slot = error_key(ques_id, page_key)
+        changed = not same_answer_value(get_answer(self.answers, ques_id, page_key), value)
         self._edited = True
         self.user_touched.add(slot)
         self.answers = set_answer_at(self.answers, ques_id, page_key, value)
         self.server_unique_keys.discard(slot)
+        # Only a real change: a combo re-pick or a decimal's "4." writes the
+        # same value again, which isn't an edit of the inputs.
+        if changed:
+            self._release_stored_calcs(ques_id, page_key)
         # Editing a question a paused calculation reads lifts its pause;
         # clearing a calculated slot pauses it; any other write un-pauses it.
         for key in list(self.cleared_calc_keys):
@@ -693,11 +803,27 @@ class FormSession:
         question = self.presented_by_id.get(ques_id) or self.ques_by_id.get(ques_id)
         if question is None:
             return
-        err = self._validate(question, value)
+        err = self._validate(question, value, page_key)
         if err:
             self.errors[slot] = err
         else:
             self.errors.pop(slot, None)
+
+    def _release_stored_calcs(self, ques_id: int, page_key: int) -> None:
+        """A stored calculation that reads the edited question follows its
+        formula again. Its stored value goes as well, unless typed here this
+        session, so a result that can't be computed any more (its input was
+        cleared) is erased, not left contradicting the inputs (the web keeps
+        it)."""
+        kept = unfreeze_stored_calcs(
+            self.stored_calc_keys, ques_id, page_key, self.calc_refs_by_ques_id, self.ques_page_by_id
+        )
+        if kept is self.stored_calc_keys:
+            return
+        for owner, k in self.stored_calc_keys - kept:
+            if (owner, k) not in self.user_touched and has_answer(self.answers, owner, k):
+                self.answers = set_answer_at(self.answers, owner, k, None)
+        self.stored_calc_keys = set(kept)
 
     def can_add_entry(self, page_id: int) -> bool:
         return (
@@ -721,6 +847,7 @@ class FormSession:
         new_key = (max(keys) if keys else 0) + 1
         self._edited = True
         self.page_keys_by_page_id = {**self.page_keys_by_page_id, page_id: [*keys, new_key]}
+        self.added_entry_keys = {**self.added_entry_keys, page_id: [*self.added_entry_keys.get(page_id, []), new_key]}
         self._invalidate()
         for i, tab in enumerate(self.tabs):
             if tab.page_id == page_id and tab.page_key == new_key:
@@ -757,9 +884,15 @@ class FormSession:
             return None if mapped is None else error_key(ques_id, mapped)
 
         self.user_touched = {s for s in (remap_slot(k) for k in self.user_touched) if s is not None}
+        self.stored_calc_keys = {s for s in (remap_slot(k) for k in self.stored_calc_keys) if s is not None}
         self.cleared_calc_keys = {s for s in (remap_slot(k) for k in self.cleared_calc_keys) if s is not None}
         self.errors = {remap_slot(k): v for k, v in self.errors.items() if remap_slot(k) is not None}  # type: ignore[misc]
         self.page_keys_by_page_id = {**self.page_keys_by_page_id, page_id: resequenced}
+        if page_id in self.added_entry_keys:
+            self.added_entry_keys = {
+                **self.added_entry_keys,
+                page_id: remap_key_list(self.added_entry_keys[page_id], remap),
+            }
         self._invalidate()
         # Focus: the removed tab falls back to entry 1 of its page; any other
         # tab stays put under its new key.
@@ -783,7 +916,7 @@ class FormSession:
     def validate_tab_questions(self, tab: Tab) -> Dict[SlotKey, str]:
         out: Dict[SlotKey, str] = {}
         for question in self.tab_questions(tab):
-            err = self._validate(question, self.value(question.id, tab.page_key))
+            err = self._validate(question, self.value(question.id, tab.page_key), tab.page_key)
             if err:
                 out[error_key(question.id, tab.page_key)] = err
         return out
@@ -911,42 +1044,70 @@ class FormSession:
                     continue
                 if evaluation.question_hidden(question.page_id, page_key, ques_id):
                     continue
-                # A stored schema-built id is never resubmitted (it would renumber the response).
-                if (
-                    baseline is not None
-                    and is_schema_id
-                    and unique_value_own(get_answer(baseline, ques_id, page_key)) != ""
-                ):
+                # On update, schema-built ids have their own pass below: the
+                # value here is the display string, and what is stored is the
+                # counter.
+                if baseline is not None and is_schema_id:
                     continue
                 if baseline is not None:
-                    present = has_answer(baseline, ques_id, page_key)
                     base = get_answer(baseline, ques_id, page_key)
-                    unchanged = is_empty_answer(value) if not present else same_answer_value(base, value)
+                    # Nothing stored, or an empty value (which reads back the
+                    # same), is changed by any value: one the user typed, or a
+                    # calculation the form computes over the blank, which is
+                    # saved as Android saves it. MANUAL and SHAPEFILE defaults
+                    # never get here: they don't fill a stored response.
+                    unchanged = is_empty_answer(value) if is_empty_answer(base) else same_answer_value(base, value)
                     if unchanged:
                         continue
                     if value is None:  # held something, holds nothing now: erase
                         cleared.append({"ques_id": ques_id, "page_key": page_key})
                         continue
-                if is_schema_id:
+                if is_schema_id:  # a create: every entry gets the form's next number
                     submit = unique_value_own(question.attr("unique_value"))
                 elif question.q_type == QType.DATETIME:
                     submit = normalize_wall_clock(value) or value
                 else:
                     submit = value
                 out.append({"ques_id": ques_id, "page_key": page_key, "value": submit})
+        # Schema-built ids on update. A counter belongs to its entry, and the raw
+        # answers move it when a removal renumbers the entries, so a shifted
+        # entry keeps its own id rather than the one stored at its new key.
+        # Write the counter wherever it differs from the one stored at that key;
+        # where the entry has none, erase the stored one (it was the removed
+        # entry's). The display may be missing (a blank prefix input) while the
+        # counter still has to follow the entry, so this walks every live key.
+        if baseline is not None:
+            for question in self.form.questions():
+                if question.q_type != QType.ID or not is_schema_unique_id(question.attributes):
+                    continue
+                for page_key in self.page_keys_by_page_id.get(question.page_id, [1]):
+                    if evaluation.question_hidden(question.page_id, page_key, question.id):
+                        continue
+                    stored = unique_value_own(get_answer(baseline, question.id, page_key))
+                    counter = self.entry_counter(question, page_key)
+                    if counter is not None:
+                        if counter != stored:
+                            out.append({"ques_id": question.id, "page_key": page_key, "value": counter})
+                    elif stored != "" and has_answer(self.opened.answers, question.id, page_key):
+                        cleared.append({"ques_id": question.id, "page_key": page_key})
         # Stored rows the form no longer holds. An entry removed from a repeating
-        # page strands the rows of its old (top) key: keys live at mount, gone
+        # page strands the rows of its old (top) key: keys live at open, gone
         # now. And the removal renumbers the entries after it (an entry added
         # later reuses a freed key), so a live key can lack an answer it stored:
         # seeding copies every stored slot, so only a renumber leaves one out.
-        # Rule-hidden slots and schema-built ids keep their stored rows, as above.
+        # Erasing is the dangerous direction, so both read the removal off what
+        # the form held when it OPENED: a key, or a slot, it never held is never
+        # erased. Rule-hidden slots keep their stored rows, as the first pass
+        # never writes them either; schema-built ids on live keys were settled
+        # just above.
         if baseline is not None:
+            opened = self.opened
             for ques_id in sorted(baseline):
                 question = self.ques_by_id.get(ques_id)
                 if question is None:
                     continue
                 live_keys = set(self.page_keys_by_page_id.get(question.page_id, [1]))
-                mounted = set(self.mounted_page_keys.get(question.page_id, [1]))
+                opened_keys = set(opened.page_keys.get(question.page_id, [1]))
                 is_schema_id = question.q_type == QType.ID and is_schema_unique_id(question.attributes)
                 for page_key in sorted(baseline[ques_id]):
                     if is_empty_answer(baseline[ques_id][page_key]):
@@ -956,9 +1117,10 @@ class FormSession:
                             is_schema_id
                             or has_answer(effective, ques_id, page_key)
                             or evaluation.question_hidden(question.page_id, page_key, ques_id)
+                            or not has_answer(opened.answers, ques_id, page_key)
                         ):
                             continue
-                    elif page_key not in mounted:
+                    elif page_key not in opened_keys:
                         continue
                     cleared.append({"ques_id": ques_id, "page_key": page_key})
         return SubmitPayload(out, cleared)

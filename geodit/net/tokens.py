@@ -67,6 +67,11 @@ class TokenStore:
         with self._lock:
             return jwt_claims.user_id(self._access) or jwt_claims.user_id(self._refresh)
 
+    @property
+    def session_id(self) -> Optional[int]:
+        with self._lock:
+            return jwt_claims.session_id(self._refresh) or jwt_claims.session_id(self._access)
+
     # -- access ------------------------------------------------------------
     def access_token(self, refresher: Refresher) -> str:
         with self._lock:

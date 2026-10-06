@@ -1,8 +1,9 @@
 """Typed API errors.
 
 The server's error bodies are not uniform: business errors are
-``{message, errors?}``, framework 401/429 are ``{detail}``. Callers branch on
-the exception class (status), never on message text.
+``{message, errors?, code?}``, framework 401/429 are ``{detail}``. Callers
+branch on the exception class (status), or on the body's machine-readable
+``code`` — never on message text.
 """
 
 from __future__ import annotations
@@ -41,6 +42,13 @@ class ApiError(Exception):
         msgs = self.errors.get(field)
         return msgs[0] if msgs else None
 
+    @property
+    def code(self) -> Optional[str]:
+        """The body's machine-readable ``code`` (api-v2 from R1), e.g.
+        ``account_deactivated``; ``None`` when it has none."""
+        raw = self.body.get("code") if isinstance(self.body, dict) else None
+        return raw if isinstance(raw, str) and raw else None
+
 
 class NetworkError(ApiError):
     """No HTTP response at all (DNS, TLS, timeout, offline)."""
@@ -61,8 +69,9 @@ class Unauthorized(ApiError):
 
 
 class SessionExpired(Unauthorized):
-    """The refresh token is dead (expired, revoked, logged out elsewhere).
-    The user must sign in again — a stored password is never replayed."""
+    """The refresh token is dead (expired, revoked, logged out elsewhere, or
+    its account is gone). The user must sign in again — a stored password is
+    never replayed."""
 
     def default_message(self) -> str:
         return "Your session has expired. Please sign in again."

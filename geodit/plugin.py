@@ -24,6 +24,12 @@ for the timer, never for the user's own actions; a 429 honours
 downloads continue; a dead session stops syncing until the user signs in again
 (a stored password is never replayed). Permissions are re-read hourly, after
 the server refuses a change, and on every manual refresh — never per tick.
+
+Sessions: the server never collapses desktop sessions, so every one the plugin
+lets go of — signed out, replaced by a new sign-in, abandoned half-way, or
+lost when QGIS quits without "Stay signed in" — is logged out there too;
+otherwise it stays alive for 7–30 days. A 429 at sign-in holds the button
+until ``Retry-After`` has passed, for that account only.
 """
 
 from __future__ import annotations
@@ -44,11 +50,11 @@ from qgis.PyQt.QtWidgets import QAction, QMessageBox, QPushButton
 
 from .config import Config, SecretStore
 from .core.clock import ServerClock
-from .core.policy import PLAN_EXPIRED_RETRY_S, backoff_delay
+from .core.policy import PLAN_EXPIRED_RETRY_S, backoff_delay, login_identity
 from .core.projects import AREA_NOT_ASSIGNED, ProjectInfo, hidden_counts, parse_desktop_projects, visible_projects
 from .core.status import FAILED, NOT_SYNCED, OK, PLAN_EXPIRED, RATE_LIMITED, Status, plural, sync_status
 from .core.web_access import resolve as resolve_web_access
-from .net.errors import ApiError, NotFound, PermissionDenied, ServerTooOld, SessionExpired
+from .net.errors import ApiError, NotFound, PermissionDenied, RateLimited, ServerTooOld, SessionExpired
 from .net.tokens import TokenStore
 from .qgis_ui.dock import PAGE_PROJECTS, GeoditDock
 from .qgis_ui.feature_picker import FeaturePicker
@@ -123,6 +129,7 @@ class GeoditPlugin:
         self.worker_id: Optional[int] = None
         self.remember = False
         self._mfa_token: Optional[str] = None
+        self._login_identity = ""  # who the last form sign-in was for (``login_identity``)
         self.projects: List[ProjectInfo] = []  # every project the user may use here, incl. hidden ones
         self.project: Optional[ProjectInfo] = None
 
@@ -154,6 +161,9 @@ class GeoditPlugin:
         # whose desktop list doesn't resolve them (``data``): project → blob.
         self._web_access: Dict[int, object] = {}
         self._session_dead = False
+        # The session's refresh token is in QGIS's password store ("Stay signed
+        # in"): it outlives QGIS. One that isn't is logged out on quitting.
+        self._session_kept = False
         self._shutting_down = False
         self._project_signals: List[tuple] = []
 
@@ -235,7 +245,11 @@ class GeoditPlugin:
         task = self._sync_task
         if task is not None:
             task.cancel()
-            task.waitForFinished(3000)  # never an unbounded wait on exit
+        # Nothing can resume a session that isn't kept once QGIS is gone.
+        logout = None if self._session_kept else self._end_session(self.tokens)
+        for running in (task, logout):
+            if running is not None:
+                running.waitForFinished(3000)  # never an unbounded wait on exit
         self.layers.detach()
 
     # ============================================================ dock
@@ -267,8 +281,11 @@ class GeoditPlugin:
     def _log(text: str, level=Qgis.MessageLevel.Info) -> None:
         QgsMessageLog.logMessage(text, "Geodit", level)
 
-    def _run(self, description: str, fn, on_done) -> None:
-        task = CallTask(description, self.base_url, self.tokens, self.clock, fn, None)
+    def _run(self, description: str, fn, on_done, tokens: Optional[TokenStore] = None) -> CallTask:
+        """``fn(client)`` off the main thread, on ``tokens`` (the current session
+        unless given), with ``on_done(value, exc)`` back on the main thread."""
+        tokens = tokens if tokens is not None else self.tokens
+        task = CallTask(description, self.base_url, tokens, self.clock, fn, None)
 
         def done(value, exc):
             self._calls.discard(task)
@@ -278,10 +295,13 @@ class GeoditPlugin:
         task.on_done = done
         self._calls.add(task)
         QgsApplication.taskManager().addTask(task)
+        return task
 
     @staticmethod
     def _error_text(exc: BaseException) -> str:
         if isinstance(exc, ApiError):
+            if exc.code == "account_deactivated":
+                return f"{exc.message} Reactivate your account on the web."
             return exc.message
         return f"Unexpected error: {exc}"
 
@@ -310,6 +330,7 @@ class GeoditPlugin:
             return
         self._new_session()
         self.remember = remember
+        self._login_identity = login_identity(username, phone, country_code)
         self.dock.set_busy(True)
         self._run(
             "Geodit sign in",
@@ -320,26 +341,45 @@ class GeoditPlugin:
                 country_code=country_code,
                 remember_me=remember,
             ),
-            self._on_login,
+            functools.partial(self._on_login, self.tokens),
         )
 
     def _new_session(self) -> None:
+        # First, while base_url and clock are still its own: end the session
+        # this one replaces (a no-op unless it is still alive).
+        self._end_session(self.tokens)
         self.base_url = self.config.base_url
         self.tokens = TokenStore()
         self.clock = ServerClock()
         self.user_id = None
         self.worker_id = None
-        self._session_dead = False
+        self._session_kept = False
+        # ``_session_dead`` stays as it is: the new session, once ready, carries
+        # on with a project the old one left open (``_on_session_ready``).
         self._backoff_until = self._rate_limit_until = self._push_paused_until = 0.0
         self._failures = 0
         self._queued = None
         self._logged_warnings = set()
         self._last_caps_refresh = 0.0
 
-    def _on_login(self, result, exc) -> None:
+    def _end_session(self, tokens: TokenStore) -> Optional[CallTask]:
+        """Log a session out on the server, in the background — best effort: a
+        failure leaves it to expire. Desktop sessions are never collapsed
+        there, so one the plugin just drops would stay alive for 7–30 days."""
+        if not tokens.has_session:
+            return None
+        return self._run("Geodit sign out", lambda c: c.logout(), lambda _v, _e: None, tokens=tokens)
+
+    def _on_login(self, tokens: TokenStore, result, exc) -> None:
+        if self.tokens is not tokens:
+            self._end_session(tokens)  # another sign-in replaced this one while it ran
+            return
         if exc is not None:
             self.dock.set_busy(False)
             self.dock.set_sign_in_error(self._error_text(exc))
+            if isinstance(exc, RateLimited):
+                # The lockout is per account: only this one waits.
+                self.dock.hold_sign_in(self._login_identity, exc.retry_after or 60)
             return
         if result.requires_2fa:
             self._mfa_token = result.mfa_token
@@ -356,9 +396,18 @@ class GeoditPlugin:
             return
         self.dock.set_busy(True)
         token = self._mfa_token
-        self._run("Geodit two-factor", lambda c: c.login_verify(mfa_token=token, code=code), self._on_verify)
+        self._run(
+            "Geodit two-factor",
+            lambda c: c.login_verify(mfa_token=token, code=code),
+            functools.partial(self._on_verify, self.tokens),
+        )
 
-    def _on_verify(self, result, exc) -> None:
+    def _on_verify(self, tokens: TokenStore, result, exc) -> None:
+        if self.tokens is not tokens:
+            # Back, or another sign-in, while the code was checked: a session
+            # it made is not wanted.
+            self._end_session(tokens)
+            return
         if exc is not None:
             self.dock.set_busy(False)
             if isinstance(exc, ApiError) and exc.field_message("mfa_token"):
@@ -371,12 +420,17 @@ class GeoditPlugin:
                 self._show_signed_out(self._error_text(exc))
             else:
                 self.dock.set_code_error(self._error_text(exc))
+                if isinstance(exc, RateLimited):
+                    self.dock.hold_verify(exc.retry_after or 60)
             return
         self._mfa_token = None
         self._after_login()
 
     def cancel_two_factor(self) -> None:
         self._mfa_token = None
+        # A code still being checked belongs to the sign-in left behind: its
+        # answer is dropped, and a session it made is ended (``_on_verify``).
+        self.tokens = TokenStore()
         self._show_signed_out()
 
     def continue_session(self) -> None:
@@ -390,12 +444,14 @@ class GeoditPlugin:
             return
         self.tokens.set_tokens(None, refresh)
         self.remember = True
+        self._session_kept = True  # it is the stored one
         self.dock.set_busy(True)
-        self._after_login()
+        self._after_login(resumed=True)
 
-    def _after_login(self) -> None:
+    def _after_login(self, *, resumed: bool = False) -> None:
         """Project list first (it is also the role check), then the profile and
-        the device worker id — off the main thread."""
+        the device worker id — off the main thread. ``resumed``: the session
+        "Stay signed in" kept ("Continue"), not a form sign-in."""
         self._web_access.clear()  # a new session reads the settings afresh
         uid = self.tokens.user_id
         cached_worker = self.config.worker_id(self.base_url, uid) if uid is not None else None
@@ -409,25 +465,40 @@ class GeoditPlugin:
                 c.logout()
                 raise
             except NotFound:
+                # The list's own 404 — a refresh 404 is a dead session (SessionExpired).
                 c.logout()
                 raise ServerTooOld() from None
             profile = c.profile()
             worker = cached_worker or c.register_device(device_uuid)
             return profile, worker, projects
 
-        self._run("Geodit: loading projects", work, self._on_session_ready)
+        self._run("Geodit: loading projects", work, functools.partial(self._on_session_ready, self.tokens, resumed))
 
-    def _on_session_ready(self, value, exc) -> None:
+    def _on_session_ready(self, tokens: TokenStore, resumed: bool, value, exc) -> None:
+        if self.tokens is not tokens:
+            if not resumed:  # never the remembered one: "Continue" still needs it
+                self._end_session(tokens)  # replaced while it loaded
+            return
         if exc is not None:
-            if isinstance(exc, (SessionExpired, PermissionDenied, ServerTooOld)):
+            dead = isinstance(exc, (SessionExpired, PermissionDenied, ServerTooOld))
+            if dead:
                 # Dead, refused, or revoked just now by the job (403 / 404 from
                 # the project list): keeping "Continue as …" would only lead back here.
                 self.secrets.delete(self.base_url)
                 self.config.forget(self.base_url)
             if isinstance(exc, PermissionDenied) and self.project is not None:
                 self.close_project(show_list=False)
-            self.tokens.clear()
+            if dead or not resumed:
+                # A form sign-in that couldn't load is ended, not stranded (a
+                # no-op once dead, or logged out by the job). A remembered one
+                # outlives a network blip, for "Continue".
+                self._end_session(tokens)
+            # Replaced, never cleared: the logout reads it on its own thread.
+            self.tokens = TokenStore()
             self._show_signed_out(self._error_text(exc))
+            if isinstance(exc, RateLimited) and not resumed and self.dock is not None:
+                # Signing in again now would only make a session to end again.
+                self.dock.hold_sign_in(self._login_identity, exc.retry_after or 60)
             return
         profile, worker, projects = value
         self.user_id = self.tokens.user_id
@@ -437,9 +508,13 @@ class GeoditPlugin:
         self.display_name = name or profile.get("username") or f"user {self.user_id}"
         if self.dock is not None:
             self.dock.set_user(self.display_name)
+        if not resumed:
+            self._end_remembered_session()
+        self._session_kept = False
         if self.remember and self.tokens.refresh_token:
             if self.secrets.save(self.base_url, self.tokens.refresh_token):
-                self.config.remember(self.base_url, self.user_id, self.display_name)
+                self._session_kept = True
+                self.config.remember(self.base_url, self.user_id, self.display_name, self.tokens.session_id)
             else:
                 self._message(
                     "Couldn't store the sign-in securely; you'll need to sign in again next time.",
@@ -451,18 +526,44 @@ class GeoditPlugin:
         self.projects = projects
         self._last_caps_refresh = time.time()
         if self.project is not None and self._session_dead:
-            # Signed in again after the session died: carry on where we were.
+            # Signed in again after the session died: carry on where we were —
+            # as the same account only, whose changes its layers hold.
             self._session_dead = False
-            match = self._visible(self.project.id)
+            same_account = self.layers.user_id == self.user_id
+            match = self._visible(self.project.id) if same_account else None
             if match is not None:
                 self.open_project(match)
                 return
             name = self.project.name
             self.close_project(show_list=False)
-            self._message(f"{name} can no longer be synced from QGIS.", Qgis.MessageLevel.Warning, 0)
+            if same_account:
+                self._message(f"{name} can no longer be synced from QGIS.", Qgis.MessageLevel.Warning, 0)
         self._session_dead = False
         self._show_projects()
         self._reopen_last_project()
+
+    def _end_remembered_session(self) -> None:
+        """A form sign-in that worked replaces the session "Stay signed in"
+        kept here — overwritten or dropped right after: end that one on the
+        server too. Only after the sign-in worked, so a mistyped password
+        keeps "Continue as …".
+
+        Never asks for the master password just for this. The same account's
+        session is ended by its id, with the new session. Another account's
+        needs its stored token, read only when that can't prompt: the
+        password store is open already, or "Stay signed in" is about to open
+        it anyway (one prompt for both). Otherwise it expires on its own."""
+        remembered = self.config.remembered(self.base_url)
+        sid = remembered.session_id if remembered is not None else None
+        if remembered is not None and remembered.user_id == self.user_id and sid is not None:
+            if sid != self.tokens.session_id:  # never the session just made
+                self._run("Geodit sign out", lambda c: c.revoke_session(sid), lambda _v, _e: None)
+            return
+        if not (self.remember or self.secrets.unlocked()):
+            return
+        stored = self.secrets.load(self.base_url)  # None when nothing is stored, or the prompt is cancelled
+        if stored and stored != self.tokens.refresh_token:
+            self._end_session(TokenStore(None, stored))
 
     def _openable(self, project_id: Optional[int]) -> Optional[ProjectInfo]:
         return next((p for p in self.projects if p.id == project_id and p.can_open), None)
@@ -625,7 +726,7 @@ class GeoditPlugin:
     def _lost_desktop_access(self, exc: BaseException) -> None:
         """The user is no longer an Owner/Admin/Editor anywhere: sign out."""
         self.close_project(show_list=False)
-        self._run("Geodit sign out", lambda c: c.logout(), lambda _v, _e: None)
+        self._end_session(self.tokens)
         self.secrets.delete(self.base_url)
         self.config.forget(self.base_url)
         self.tokens = TokenStore()
@@ -654,7 +755,7 @@ class GeoditPlugin:
                 return
         self.close_project(show_list=False)
         # The logout task captures the current TokenStore; the next session gets a fresh one.
-        self._run("Geodit sign out", lambda c: c.logout(), lambda _v, _e: None)
+        self._end_session(self.tokens)
         self.secrets.delete(self.base_url)
         self.config.forget(self.base_url)
         self.tokens = TokenStore()
@@ -663,6 +764,7 @@ class GeoditPlugin:
 
     def _on_session_expired(self) -> None:
         self._session_dead = True
+        self._session_kept = False  # no longer stored
         self._queued = None
         self.timer.stop()
         self.secrets.delete(self.base_url)

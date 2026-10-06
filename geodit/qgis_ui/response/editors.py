@@ -34,6 +34,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ...forms.answers import (
+    MANUAL_TEXT_MAX_LEN,
     build_manual_value,
     coerce_choice_list,
     coerce_numeric,
@@ -44,13 +45,22 @@ from ...forms.answers import (
     get_option_label,
     is_manual_value,
     same_answer_value,
+    stored_choice_list_length,
 )
 from ...forms.defaults import is_schema_unique_id
 from ...forms.jsnum import as_int_if_integral, is_number, js_number
-from ...forms.model import PARAGRAPH_ANSWER_MAX_LEN, DefaultType, IdentityType, Option, QType, Question
+from ...forms.model import (
+    PARAGRAPH_ANSWER_MAX_LEN,
+    TEXT_ANSWER_MAX_LEN,
+    DefaultType,
+    IdentityType,
+    Option,
+    QType,
+    Question,
+)
 from ...forms.phone import COUNTRIES, DEFAULT_COUNTRY, country_for, dial_code, split_phone, without_trunk_zero
 from ...forms.timezone import parse_wall_clock
-from ...forms.validation import text_length_range
+from ...forms.validation import js_len, text_length_range
 from ..theme import Theme, font, line_icon
 from ..widgets import Pill
 
@@ -77,6 +87,16 @@ def _field(edit: QLineEdit, placeholder: str = "") -> QLineEdit:
     edit.setPlaceholderText(placeholder)
     edit.setProperty("field", "true")
     return edit
+
+
+def _fit_max_length(edit: QLineEdit, cap: int, text: str) -> None:
+    """Cap typing at ``cap`` without cutting what the field holds or is about
+    to show. An HTML ``maxLength`` leaves a longer value alone; Qt cuts it,
+    silently (no ``textEdited``), and ``setMaxLength`` moves the cursor, so
+    the limit never drops below either text and changes only when it must."""
+    limit = max(cap, js_len(edit.text()), js_len(text))
+    if edit.maxLength() != limit:
+        edit.setMaxLength(limit)
 
 
 def _tool(icon: str, tooltip: str, theme: Theme, text: str = "") -> QToolButton:
@@ -261,16 +281,19 @@ class LineEditor(QuestionEditor):
         self.edit = _field(QLineEdit())
         self.transform: Callable[[str], str] = lambda text: text
         self.computed = False
+        self.cap: Optional[int] = None
         if q.q_type == QType.TEXT:
             self.edit.setPlaceholderText(_placeholder(q))
-            self.edit.setMaxLength(text_length_range(q.attributes)["max"])
+            self.cap = text_length_range(q.attributes)["max"]
         elif q.q_type == QType.EMAIL:
             self.edit.setPlaceholderText("name@example.com")
             self.transform = lambda text: re.sub(r"\s", "", text).lower()
+            self.cap = TEXT_ANSWER_MAX_LEN
         elif q.q_type == QType.IDENTITY:
             kind = q.attr("identity_type")
             self.edit.setPlaceholderText(_IDENTITY_PLACEHOLDER.get(kind, "Enter identity"))
             self.transform = lambda text: sanitize_identity(text, kind)
+            self.cap = TEXT_ANSWER_MAX_LEN
         elif q.q_type == QType.ID:
             self.computed = is_schema_unique_id(q.attributes)
             if self.computed:
@@ -278,8 +301,10 @@ class LineEditor(QuestionEditor):
                 self.edit.setReadOnly(True)
             else:
                 self.edit.setPlaceholderText("Enter ID")
-                self.edit.setMaxLength(32)
+                self.cap = 32
                 self.transform = lambda text: re.sub(r"[^A-Za-z0-9_-]", "", text)
+        if self.cap is not None:
+            _fit_max_length(self.edit, self.cap, "")
         self.edit.textEdited.connect(self._edited)
         self.body.addWidget(self.edit)
 
@@ -294,6 +319,8 @@ class LineEditor(QuestionEditor):
     def show_value(self, value: Any) -> None:
         text = coerce_string(value)
         if self.edit.text() != text:
+            if self.cap is not None:
+                _fit_max_length(self.edit, self.cap, text)
             self.edit.setText(text)
 
     def set_editable(self, editable: bool) -> None:
@@ -624,6 +651,7 @@ class DropdownEditor(QuestionEditor):
         self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo.activated.connect(self._picked)
         self.manual = _field(QLineEdit(), "Type your answer")
+        _fit_max_length(self.manual, MANUAL_TEXT_MAX_LEN, "")
         self.manual.hide()
         self.manual.textEdited.connect(lambda text: self.emit(build_manual_value(text)))
         self.body.addWidget(self.combo)
@@ -669,6 +697,7 @@ class DropdownEditor(QuestionEditor):
             index = self.combo.findData(str(manual.id)) if manual is not None else -1
             self.manual.setVisible(True)
             if self.manual.text() != get_manual_text(current):
+                _fit_max_length(self.manual, MANUAL_TEXT_MAX_LEN, get_manual_text(current))
                 self.manual.setText(get_manual_text(current))
         else:
             index = self.combo.findData(current) if current else -1
@@ -745,15 +774,21 @@ class MultipleChoiceEditor(QuestionEditor):
     def _sync(self, value: Any) -> None:
         raw = coerce_choice_list(value)
         manual_entry = next((v for v in raw if is_manual_value(v)), None)
-        selected = {v for v in raw if not is_manual_value(v)}
+        picks = [v for v in raw if not is_manual_value(v)]
+        selected = set(picks)
         manual = find_manual_option(self._options)
         for check in self.checks:
             oid = check.property("option_id")
             is_manual = manual is not None and oid == str(manual.id)
             check.setChecked(manual_entry is not None if is_manual else oid in selected)
+        # The whole list is stored in one varchar(255), so the typed text gets
+        # what the other picks leave (validation has the exact rule).
+        budget = TEXT_ANSWER_MAX_LEN - stored_choice_list_length([*picks, build_manual_value("")])
+        text = get_manual_text(manual_entry)
+        _fit_max_length(self.manual, min(MANUAL_TEXT_MAX_LEN, max(0, budget)), text)
         self.manual.setVisible(manual_entry is not None)
-        if manual_entry is not None and self.manual.text() != get_manual_text(manual_entry):
-            self.manual.setText(get_manual_text(manual_entry))
+        if manual_entry is not None and self.manual.text() != text:
+            self.manual.setText(text)
 
     def show_value(self, value: Any) -> None:
         self._sync(value)

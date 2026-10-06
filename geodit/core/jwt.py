@@ -1,4 +1,4 @@
-"""Read (never verify) JWT claims — expiry and user id of our own tokens."""
+"""Read (never verify) JWT claims — expiry, user and session id of our own tokens."""
 
 from __future__ import annotations
 
@@ -35,5 +35,20 @@ def user_id(token: Optional[str]) -> Optional[int]:
         return None
     try:
         return int(uid) if uid is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def session_id(token: Optional[str]) -> Optional[int]:
+    """The server's session id (``sid``): what ``DELETE /user/sessions/{sid}``
+    ends. Not a secret — only the session's own user can end it."""
+    if not token:
+        return None
+    try:
+        sid = decode_claims(token).get("sid")
+    except ValueError:
+        return None
+    try:
+        return int(sid) if sid is not None else None
     except (TypeError, ValueError):
         return None

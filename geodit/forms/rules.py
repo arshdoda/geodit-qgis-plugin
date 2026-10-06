@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 from .answers import (
     Answers,
     TabKey,
+    canonical_choice_order,
     coerce_numeric,
     coerce_string,
     get_answer,
@@ -483,8 +484,12 @@ def evaluate_unique_rules(
                 ):
                     break
                 slots.append((question.id, question.page_id, pk))
+                # One clock time in two spellings is one value, and so is one
+                # set of choices picked in two orders.
                 if question.q_type == QType.DATETIME:
                     item_keys.append(normalize_wall_clock(value) or coerce_string(value))
+                elif question.q_type == QType.MULTIPLE_CHOICE and isinstance(value, list):
+                    item_keys.append(coerce_string(canonical_choice_order(value, question.opt_list)))
                 else:
                     item_keys.append(coerce_string(value))
             if len(slots) < len(targets):

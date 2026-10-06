@@ -17,11 +17,11 @@ from __future__ import annotations
 import math
 import re
 import weakref
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote
 
 from .jsnum import as_float, is_number, js_number, js_str, js_trim
-from .model import CHOICE_QTYPES, MANUAL_ENTRY_OPTION, Form, Option, Question
+from .model import CHOICE_QTYPES, MANUAL_ENTRY_OPTION, TEXT_ANSWER_MAX_LEN, Form, Option, Question
 
 Answers = Dict[int, Dict[int, Any]]
 TabKey = Tuple[int, int]  # (page_id, page_key) — the web's `"pageId,pageKey"`
@@ -29,6 +29,10 @@ SlotKey = Tuple[int, int]  # (ques_id, page_key) — the web's `errorKey`
 
 MANUAL_ENTRY_LABEL = "Enter Manually"
 MANUAL_VALUE_PREFIX = f"{MANUAL_ENTRY_OPTION}:"
+# The longest manual text a DROPDOWN answer can store: api-v2 keeps it in a
+# varchar(255) and rejects the whole save past that, and the prefix counts.
+# Android caps typing at the same 246.
+MANUAL_TEXT_MAX_LEN = TEXT_ANSWER_MAX_LEN - len(MANUAL_VALUE_PREFIX)
 
 _ABSOLUTE_URL = re.compile(r"^https?://", re.IGNORECASE)
 
@@ -217,6 +221,19 @@ def remap_page_keys(
     return out if mutated else answers  # type: ignore[return-value]
 
 
+def remap_key_list(keys: Iterable[int], remap: Mapping[int, Optional[int]]) -> List[int]:
+    """Apply the same removal remap to a list of page keys (``remapKeyList``):
+    the removed key drops out, the keys above it shift down, and a key the remap
+    doesn't name passes through."""
+    out: List[int] = []
+    for key in keys:
+        if key not in remap:
+            out.append(key)
+        elif remap[key] is not None:
+            out.append(remap[key])  # type: ignore[arg-type]
+    return out
+
+
 def flatten_tab(answers: Mapping[int, Mapping[int, Any]], page_key: int) -> Dict[int, Any]:
     return {ques_id: by_key[page_key] for ques_id, by_key in answers.items() if page_key in by_key}
 
@@ -254,6 +271,32 @@ def to_manual_answer(value: str) -> Optional[str]:
     if value == MANUAL_ENTRY_OPTION:
         return build_manual_value("")
     return None
+
+
+def canonical_choice_order(values: Sequence[Any], options: Sequence[Option]) -> List[Any]:
+    """A MULTIPLE_CHOICE selection in the one order every platform writes: each
+    option once, by the options' ``position`` and then their id (``position``
+    isn't unique — api-v2 defaults it to 0 — so the id settles ties, as
+    geodit-celery's import does), then ids no option matches (in their own
+    order), then the manual entry. api-v2 stores and compares the list as one
+    string, so in click order the same picks would be two different answers.
+    Pass the question's FULL option list, so a pick that rules hide keeps its
+    rank."""
+    rank = {str(o.id): i for i, o in enumerate(sorted(options, key=lambda o: (o.position, o.id)))}
+    picks = list(dict.fromkeys(v for v in values if not is_manual_selection(v)))
+    return [
+        *sorted((v for v in picks if v in rank), key=rank.__getitem__),
+        *(v for v in picks if v not in rank),
+        *(v for v in values if is_manual_selection(v)),
+    ]
+
+
+def stored_choice_list_length(values: Sequence[Any]) -> int:
+    """How long a MULTIPLE_CHOICE answer is once stored: api-v2 writes the list
+    as Python's ``str(list)`` — ``['353', '_manual_:Pune']`` — into the same
+    varchar(255), so the brackets, quotes, ``, `` separators and repr escapes
+    all count, in code points. The web emulates that repr; this is the real one."""
+    return len(str(list(values)))
 
 
 # ------------------------------------------------------------------ choice labels

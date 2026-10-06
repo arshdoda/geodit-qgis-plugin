@@ -283,6 +283,7 @@ class FeatureFormWindow(QDialog):
         self._editors: Dict[int, QuestionEditor] = {}
         self._built_tab: Optional[Tuple[int, int]] = None
         self._saving = False
+        self._status_editable = False  # the header lets the status be picked
         self._busy_media = 0
         self._retry: Optional[Callable[[], None]] = None
         self._scroll_target = 0
@@ -629,7 +630,6 @@ class FeatureFormWindow(QDialog):
         if header.show_meta:
             index = self.status.findData(header.status) if header.status is not None else -1
             self.status.setCurrentIndex(index if index >= 0 else 0)
-            self.status.setEnabled(header.status_editable)
             self.status_mark.set_mode({3: "approved", 2: "rejected"}.get(header.status or 0, "pending"))
             self.surveyor_avatar.set_member(header.surveyor or "?", header.surveyor_id)
             self.surveyor.setText(header.surveyor or "—")
@@ -645,6 +645,8 @@ class FeatureFormWindow(QDialog):
             self.verifier.style().polish(self.verifier)
             self.verified.setText(f"on {header.verified_on}" if verified and header.verified_on else "")
             self.verified.setVisible(verified and bool(header.verified_on))
+        self._status_editable = header.show_meta and header.status_editable
+        self._lock_status()
         self._set_banners(self.notices, header.notices)
 
     def _set_banners(self, layout: QVBoxLayout, items: List[Tuple[str, str]]) -> None:
@@ -659,8 +661,8 @@ class FeatureFormWindow(QDialog):
                 continue
             banner = Banner(kind)
             banner.apply_theme(self.theme)
+            layout.addWidget(banner)  # first: shown without a parent, it would flash up as a window
             banner.set_message(text, kind)
-            layout.addWidget(banner)
 
     def _status_picked(self, index: int) -> None:
         value = self.status.itemData(index)
@@ -940,7 +942,13 @@ class FeatureFormWindow(QDialog):
     def set_saving(self, saving: bool) -> None:
         self._saving = saving
         self.saving.setVisible(saving)
+        self._lock_status()
         self.refresh()
+
+    def _lock_status(self) -> None:
+        """A status applies the moment it is picked: never while one, or the
+        form, is saving (the save's reload would show the status it read)."""
+        self.status.setEnabled(self._status_editable and not self._saving)
 
     def set_submit_error(self, text: str) -> None:
         self.submit_error.setText(text or "")

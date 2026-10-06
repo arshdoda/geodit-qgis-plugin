@@ -36,6 +36,10 @@ class RememberedUser:
     display_name: str
     project_id: Optional[int]
     project_name: str
+    # The remembered session's id: a later sign-in as the same account ends it
+    # without reading its token (no master password). None when an older
+    # version of the plugin remembered it.
+    session_id: Optional[int] = None
 
 
 class Config:
@@ -128,17 +132,20 @@ class Config:
         if uid in (None, ""):
             return None
         project = self._get(key + "project_id", None)
+        sid = self._get(key + "session_id", None)
         return RememberedUser(
             user_id=int(uid),
             display_name=str(self._get(key + "display_name", "")),
             project_id=int(project) if project not in (None, "") else None,
             project_name=str(self._get(key + "project_name", "")),
+            session_id=int(sid) if sid not in (None, "") else None,
         )
 
-    def remember(self, base_url: str, user_id: int, display_name: str) -> None:
+    def remember(self, base_url: str, user_id: int, display_name: str, session_id: Optional[int] = None) -> None:
         key = f"session/{server_key(base_url)}/"
         self._set(key + "user_id", int(user_id))
         self._set(key + "display_name", display_name)
+        self._set(key + "session_id", "" if session_id is None else int(session_id))
 
     def remember_project(self, base_url: str, project_id: Optional[int], name: str = "") -> None:
         key = f"session/{server_key(base_url)}/"
@@ -162,6 +169,15 @@ class SecretStore:
         try:
             return bool(am.storeAuthSetting(self._key(base_url), refresh, True))
         except Exception:  # noqa: BLE001 - auth DB unavailable / password refused
+            return False
+
+    @staticmethod
+    def unlocked() -> bool:
+        """The master password has been given in this QGIS session already, so
+        reading the store can't show its prompt."""
+        try:
+            return bool(QgsApplication.authManager().masterPasswordIsSet())
+        except Exception:  # noqa: BLE001 - auth DB unavailable
             return False
 
     def load(self, base_url: str) -> Optional[str]:

@@ -91,6 +91,7 @@ class ResponseMeta:
     verifier_id: Optional[int] = None
     verified_on: str = ""
     found: bool = True
+    status_saving: bool = False  # a picked status is on its way to the server
 
 
 @dataclass
@@ -100,6 +101,7 @@ class LoadResult:
     rows: Optional[List[dict]]
     team: Optional[Dict[int, str]]
     latest: Dict[int, int] = field(default_factory=dict)
+    rows_error: Optional[ApiError] = None  # the status read was refused (403 / 404 / 422)
 
 
 class ProbeFailed(Exception):
@@ -365,6 +367,7 @@ class FeatureFormController:
         self._view_only_notice = ""
         self._view_only_caps = None  # the permissions a save was refused under (403)
         self._not_found_notice = ""
+        self._status_notice = ""  # the status block couldn't be read: shown in its place
 
     # ================================================================ window
     def ensure_window(self):
@@ -560,6 +563,7 @@ class FeatureFormController:
         self._load_seq += 1
         seq = self._load_seq
         self.session = None
+        self._not_found_notice = self._status_notice = ""  # never the previous feature's, while this one loads
         caps = project.data
         server = self.plugin.base_url
         form_key = (server, target.project_id, target.form_id)
@@ -574,13 +578,14 @@ class FeatureFormController:
             payload = cached_payload or client.form_data(target.project_id, target.form_id)
             items: List[dict] = []
             rows: Optional[List[dict]] = None
+            rows_error: Optional[ApiError] = None
             if target.ans_id is not None:
                 items = client.ans_data_list(target.project_id, target.form_id, [target.ans_id])
                 if caps.can_view:
                     try:
                         rows = client.ans_rows(target.project_id, target.form_id, [target.ans_id])
-                    except (PermissionDenied, NotFound, ValidationFailed):
-                        rows = None
+                    except (PermissionDenied, NotFound, ValidationFailed) as exc:
+                        rows_error = exc  # the answers still show; the status block says why it doesn't
             team = None
             if need_team:
                 try:
@@ -600,7 +605,7 @@ class FeatureFormController:
                             latest[question.id] = client.latest_id(target.project_id, target.form_id, question.id)
                         except (ApiError, ValueError):
                             pass  # a failed hint falls back to the configured base
-            return LoadResult(payload, items, rows, team, latest)
+            return LoadResult(payload, items, rows, team, latest, rows_error)
 
         def done(result: Optional[LoadResult], exc) -> None:
             if seq != self._load_seq or self.window is None or self.target is not target:
@@ -618,6 +623,8 @@ class FeatureFormController:
             if result.team is not None:
                 self._team_cache[(server, target.project_id)] = result.team
             self._show(result, view)
+            if isinstance(result.rows_error, PermissionDenied):
+                self.plugin._refresh_caps()  # the role changed under us, as after a refused save
 
         self.plugin._run("Geodit: loading the feature form", work, done)
 
@@ -636,7 +643,11 @@ class FeatureFormController:
                     question.attributes["unique_value"] = latest + 1
         self.form = form
         self.meta = None
-        self._not_found_notice = ""
+        if target.ans_id is not None and result.rows_error is not None:
+            self._status_notice = (
+                "Couldn't load this response's surveyor, verifier and status: "
+                + self.plugin._error_text(result.rows_error)
+            )
         if target.ans_id is not None and result.rows is not None:
             row = next((r for r in result.rows if _int_or_none(r.get("id")) == target.ans_id), None)
             if row is None:
@@ -695,6 +706,8 @@ class FeatureFormController:
             notices.append(("warning", self._view_only_notice))
         if self._not_found_notice:
             notices.append(("warning", self._not_found_notice))
+        if self._status_notice and caps is not None and caps.can_view:  # it stands in for the block
+            notices.append(("warning", self._status_notice))
         if target.ans_id is None and target.unsaved_edits:
             notices.append(
                 (
@@ -719,7 +732,7 @@ class FeatureFormController:
             view_only=not editable,
             show_meta=bool(meta is not None and caps is not None and caps.can_view and target.ans_id is not None),
             status=meta.status if meta else None,
-            status_editable=editable,
+            status_editable=editable and not (meta is not None and meta.status_saving),
             surveyor=who(meta.surveyor_id) if meta else "",
             surveyor_id=meta.surveyor_id if meta else None,
             edited_on=meta.edited_on if meta else "",
@@ -738,6 +751,10 @@ class FeatureFormController:
         if self._saving:
             if self._saving_target is not target:  # this form's own save shows "Saving…"
                 window.set_submit_error("The previous form is still saving — try again in a moment.")
+            return
+        if self.meta is not None and self.meta.status_saving:
+            # The save's reload would replace the meta the status reply is checked against.
+            window.set_submit_error("Wait for the status change to finish, then save.")
             return
         if window.media_uploading():
             window.set_submit_error("Wait for the file to finish uploading, then save.")
@@ -952,13 +969,15 @@ class FeatureFormController:
         target, meta, project = self.target, self.meta, self.plugin.project
         if target is None or target.ans_id is None or meta is None or project is None or not project.data.can_edit:
             return
-        if meta.status == status:
+        if meta.status_saving or meta.status == status:
             return
         previous = (meta.status, meta.verifier_id, meta.verified_on)
         meta.status = status
+        meta.status_saving = True  # one change at a time: the combo is locked until the reply
         self.window.set_header(self._header(meta))
 
         def done(result, exc) -> None:
+            meta.status_saving = False
             if self.target is not target or self.meta is not meta:
                 return
             if exc is not None:

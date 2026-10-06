@@ -15,6 +15,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Set
 
 from .answers import (
+    MANUAL_TEXT_MAX_LEN,
     Answers,
     TabKey,
     coerce_choice_list,
@@ -24,6 +25,7 @@ from .answers import (
     is_empty_answer,
     is_manual_value,
     js_string_of,
+    stored_choice_list_length,
     tab_key,
 )
 from .defaults import is_schema_unique_id
@@ -65,6 +67,10 @@ DECIMAL_SCALE = 1e4
 DECIMAL_SCALED_LIMIT = 1e15
 CHECK_CALC_INPUTS = " — check the answers it's calculated from."
 REQUIRED = "This question is required."
+# EMAIL, IDENTITY, DROPDOWN and MULTIPLE_CHOICE answers are stored in a
+# varchar(255) too: api-v2 measures them in code points (``len(str(value))``)
+# and rejects the whole save past it.
+CHAR_TOO_LONG = f"Maximum {TEXT_ANSWER_MAX_LEN} characters."
 
 
 def _js_date_valid(match: re.Match[str]) -> bool:
@@ -190,10 +196,17 @@ def _range_error(attrs: Mapping[str, Any], number: float) -> Optional[str]:
     return None
 
 
-def validate_value(question: Question, value: Any, *, read_only_editable: bool = False) -> Optional[str]:
+def validate_value(
+    question: Question, value: Any, *, read_only_editable: bool = False, stored_unchanged: bool = False
+) -> Optional[str]:
     """The error message for one answer, or None. ``read_only_editable`` is the
     answer sheet's "Edit read-only fields": an author-read-only question is then
-    checked like any other, except it can never be required."""
+    checked like any other, except it can never be required.
+
+    ``stored_unchanged``: the response already stores this exact value here, so
+    its stored length isn't checked again — the server holds it, and a legacy
+    shape can measure longer here than it does there. (The web checks it anyway,
+    which can block every save of such a response.)"""
     raw = question.attributes if isinstance(question.attributes, Mapping) else {}
     unlocked = bool(raw.get("read_only")) and read_only_editable
     if raw.get("read_only") and not unlocked:
@@ -208,6 +221,8 @@ def validate_value(question: Question, value: Any, *, read_only_editable: bool =
     if q_type == QType.EMAIL:
         if isinstance(value, str) and not _EMAIL.fullmatch(js_trim(value)):
             return "Enter a valid email address."
+        if isinstance(value, str) and not stored_unchanged and len(value) > TEXT_ANSWER_MAX_LEN:
+            return CHAR_TOO_LONG
         return None
     if q_type == QType.PHONE:
         if not isinstance(value, str) or not js_trim(value):
@@ -218,18 +233,19 @@ def validate_value(question: Question, value: Any, *, read_only_editable: bool =
         if not text:
             return None
         kind = attrs.get("identity_type")
-        if not is_number(kind):
-            return None
-        if kind == IdentityType.AADHAAR_CARD and not _AADHAAR.fullmatch(_SPACES.sub("", text)):
-            return "Enter a valid 12-digit Aadhaar number."
-        if kind == IdentityType.PAN_CARD and not _PAN.fullmatch(text.upper()):
-            return "Enter a valid PAN (e.g. ABCPD1234E)."
-        if kind == IdentityType.VOTER_ID and not _VOTER_ID.fullmatch(text.upper()):
-            return "Enter a valid 10-character Voter ID (e.g. ABC1234567)."
-        if kind == IdentityType.PASSPORT and not _PASSPORT.fullmatch(text):
-            return "Enter a valid passport number (e.g. A1234567)."
-        if kind == IdentityType.DRIVING_LICENSE and not _DRIVING_LICENSE.fullmatch(text.upper()):
-            return "Enter a valid driving licence number."
+        if is_number(kind):
+            if kind == IdentityType.AADHAAR_CARD and not _AADHAAR.fullmatch(_SPACES.sub("", text)):
+                return "Enter a valid 12-digit Aadhaar number."
+            if kind == IdentityType.PAN_CARD and not _PAN.fullmatch(text.upper()):
+                return "Enter a valid PAN (e.g. ABCPD1234E)."
+            if kind == IdentityType.VOTER_ID and not _VOTER_ID.fullmatch(text.upper()):
+                return "Enter a valid 10-character Voter ID (e.g. ABC1234567)."
+            if kind == IdentityType.PASSPORT and not _PASSPORT.fullmatch(text):
+                return "Enter a valid passport number (e.g. A1234567)."
+            if kind == IdentityType.DRIVING_LICENSE and not _DRIVING_LICENSE.fullmatch(text.upper()):
+                return "Enter a valid driving licence number."
+        if not stored_unchanged and len(js_string_of(value)) > TEXT_ANSWER_MAX_LEN:
+            return CHAR_TOO_LONG
         return None
     if q_type == QType.ID:
         text = js_trim(value) if isinstance(value, str) else ""
@@ -294,6 +310,8 @@ def validate_value(question: Question, value: Any, *, read_only_editable: bool =
                 return "Select a valid option."
             if attrs.get("mandatory") and js_trim(get_manual_text(ident)) == "":
                 return "Type your manual answer."
+            if not stored_unchanged and len(get_manual_text(ident)) > MANUAL_TEXT_MAX_LEN:
+                return f"Maximum {MANUAL_TEXT_MAX_LEN} characters."
             return None
         if not any(str(o.id) == ident for o in options):
             return "Select a valid option."
@@ -302,7 +320,8 @@ def validate_value(question: Question, value: Any, *, read_only_editable: bool =
         options = question.opt_list
         has_manual = any(o.value == MANUAL_ENTRY_OPTION for o in options)
         allowed = {str(o.id) for o in options}
-        for item in coerce_choice_list(value):
+        items = coerce_choice_list(value)
+        for item in items:
             if is_manual_value(item):
                 if not has_manual:
                     return "Selected option is no longer available."
@@ -311,6 +330,13 @@ def validate_value(question: Question, value: Any, *, read_only_editable: bool =
                 continue
             if js_string_of(item) not in allowed:
                 return "Selected option is no longer available."
+        # The list is stored as one string (Python's `str(list)`) in a
+        # varchar(255); past that the server rejects the whole save.
+        stored = stored_choice_list_length(items) if isinstance(value, list) else len(js_string_of(value))
+        if not stored_unchanged and stored > TEXT_ANSWER_MAX_LEN:
+            if any(is_manual_value(item) for item in items):
+                return "Too long to save — shorten the typed answer or pick fewer options."
+            return "Too many options selected to save — pick fewer."
         return None
     if q_type == QType.LOCATION:
         if not value:

@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .answers import Answers, TabKey, coerce_numeric, get_answer, tab_key
+from .answers import Answers, TabKey, canonical_choice_order, coerce_numeric, get_answer, tab_key
 from .defaults import is_schema_unique_id
 from .jsnum import js_str
 from .model import QType, Question
@@ -85,6 +85,11 @@ def to_unique_check_value(question: Question, value: Any) -> Any:
     if question.q_type == QType.DATETIME:
         normalized = normalize_wall_clock(value)
         return normalized if normalized is not None else _SKIP
+    if question.q_type == QType.MULTIPLE_CHOICE and isinstance(value, list):
+        # The server compares the stored `str(list)` as one string, so probe the
+        # order every platform writes: a value stored in click order, before
+        # that, still probes as its set.
+        return canonical_choice_order(value, question.opt_list)
     return value
 
 

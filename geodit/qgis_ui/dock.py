@@ -14,11 +14,13 @@ something does).
 
 Contract with the controller and tests: the ``stack`` page indices below,
 ``status_label`` (its text is read back), ``code_error`` (shown/hidden, never
-replaced) and the public ``show_*`` / ``set_*`` methods.
+replaced) and the public ``show_*`` / ``set_*`` / ``hold_*`` methods.
 """
 
 from __future__ import annotations
 
+import math
+import time
 from typing import Iterable, List, Optional, Sequence, Tuple, Union
 
 from qgis.gui import QgsFilterLineEdit, QgsPasswordLineEdit
@@ -50,6 +52,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from ..config import RememberedUser
+from ..core.policy import format_wait, login_identity
 from ..core.projects import HiddenCounts, ProjectInfo
 from ..core.status import plural
 from ..sync.context import SyncReport
@@ -262,6 +265,17 @@ class GeoditDock(QDockWidget):
         self._click_hold = QTimer(self)
         self._click_hold.setSingleShot(True)
         self._click_hold.timeout.connect(self._release_project_page)  # a method: dropped with the dock
+        # A 429 at sign-in (``hold_*``): Sign in waits until a deadline for the
+        # account it was for — the server's lockout is per account — and
+        # Verify for its own. Wall-clock time, like sync's wait, so a wait
+        # also runs out while the computer sleeps. Set before the pages: the
+        # sign-in page reads it while it is built.
+        self._now = time.time
+        self._sign_in_hold: Optional[Tuple[str, float]] = None  # (login identity, deadline)
+        self._verify_until = 0.0
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setInterval(1000)
+        self._hold_timer.timeout.connect(self._tick_holds)  # a method: dropped with the dock
 
         self._root = QWidget()
         self._root.setObjectName("GeoditRoot")
@@ -365,21 +379,26 @@ class GeoditDock(QDockWidget):
         rb.setSpacing(10)
         card_frame = QFrame()
         card_frame.setProperty("card", "true")
-        row = QHBoxLayout(card_frame)
-        row.setContentsMargins(12, 10, 12, 10)
+        card_box = QVBoxLayout(card_frame)
+        card_box.setContentsMargins(12, 10, 12, 10)
+        who = QWidget()
+        row = QHBoxLayout(who)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
         self.remembered_avatar = Avatar(34)
         names = QVBoxLayout()
         names.setSpacing(0)
-        self.remembered_label = label("", bold=True, wrap=False)
-        self.remembered_server = label("", kind="muted", wrap=False)
+        self.remembered_label = NameLabel(bold=True)  # a long name breaks anywhere
+        self.remembered_server = label("", kind="muted")
         names.addWidget(self.remembered_label)
         names.addWidget(self.remembered_server)
-        self.continue_btn = _primary("Continue")
-        self.continue_btn.clicked.connect(lambda: self.c.continue_session())
         row.addWidget(self.remembered_avatar)
         row.addLayout(names, 1)
-        row.addWidget(self.continue_btn)
+        self.continue_btn = _primary("Continue")
+        self.continue_btn.clicked.connect(lambda: self.c.continue_session())
+        # Continue beside the account while both fit, under it on a narrow panel.
+        self.remembered_row = SplitRow(who, self.continue_btn)
+        card_box.addWidget(self.remembered_row)
         rb.addWidget(card_frame)
         or_row = QHBoxLayout()
         or_row.setSpacing(8)
@@ -389,7 +408,8 @@ class GeoditDock(QDockWidget):
         rb.addLayout(or_row)
         layout.addWidget(self.remembered_box)
 
-        self.id_kind = SegmentedControl([("username", "Username"), ("phone", "Phone number")])
+        # Short labels: both must fit a narrow panel side by side (the field says "Phone number").
+        self.id_kind = SegmentedControl([("username", "Username"), ("phone", "Phone")])
         self.id_kind.changed.connect(self._id_kind_changed)
         layout.addWidget(self.id_kind)
         self.username = _field("Username")
@@ -412,10 +432,10 @@ class GeoditDock(QDockWidget):
         for edit in (self.username, self.phone, self.password):
             edit.returnPressed.connect(self._submit_sign_in)
 
-        self.remember = QCheckBox("Stay signed in on this computer")
+        self.remember = QCheckBox("Stay signed in")  # a checkbox can't wrap: short, for a narrow panel
         self.remember.setToolTip(
-            "Keeps you signed in for up to 30 days. The sign-in is stored in QGIS's encrypted "
-            "password store, which may ask for the QGIS master password."
+            "Keeps you signed in on this computer for up to 30 days. The sign-in is stored in QGIS's "
+            "encrypted password store, which may ask for the QGIS master password."
         )
         layout.addWidget(self.remember)
         self.sign_in_btn = _primary("Sign in")
@@ -427,6 +447,9 @@ class GeoditDock(QDockWidget):
         layout.addWidget(self.sign_in_error)
         layout.addStretch(1)
 
+        # Only now: setting "+91" above fired textChanged before the button existed.
+        for edit in (self.username, self.phone, self.country_code):
+            edit.textChanged.connect(self._update_sign_in_btn)
         self._id_kind_changed()
         return page
 
@@ -434,17 +457,22 @@ class GeoditDock(QDockWidget):
         phone = self.id_kind.value() == "phone"
         self.username.setVisible(not phone)
         self.phone_row.setVisible(phone)
+        self._update_sign_in_btn()  # a wait holds one account, typed one way
+
+    def _identity_fields(self) -> dict:
+        """The account the form names, as ``sign_in`` takes it."""
+        phone = self.id_kind.value() == "phone"
+        return {
+            "username": None if phone else self.username.text().strip(),
+            "phone": self.phone.text().strip() if phone else None,
+            "country_code": self.country_code.text().strip() or "+91",
+        }
 
     def _submit_sign_in(self) -> None:
+        if not self.sign_in_btn.isEnabled():
+            return  # busy, or waiting out a 429 — Enter in a field lands here too
         self.sign_in_error.set_message("")
-        phone = self.id_kind.value() == "phone"
-        self.c.sign_in(
-            username=None if phone else self.username.text().strip(),
-            phone=self.phone.text().strip() if phone else None,
-            country_code=self.country_code.text().strip() or "+91",
-            password=self.password.text(),
-            remember=self.remember.isChecked(),
-        )
+        self.c.sign_in(**self._identity_fields(), password=self.password.text(), remember=self.remember.isChecked())
 
     # ---------------------------------------------------------- two factor
     def _build_two_factor(self) -> QWidget:
@@ -485,6 +513,8 @@ class GeoditDock(QDockWidget):
         return page
 
     def _submit_code(self) -> None:
+        if not self.verify_btn.isEnabled():
+            return  # busy, or waiting out a 429 — Enter in the code field lands here too
         self.code_error.set_message("")
         self.c.verify_code(self.code.text().strip())
 
@@ -890,6 +920,7 @@ class GeoditDock(QDockWidget):
     def show_two_factor(self, error: str = "") -> None:
         self.code.clear()
         self.set_code_error(error)
+        self._verify_until = 0.0  # a new challenge: no wait carried over (as on the web)
         self.set_busy(False)
         self.stack.setCurrentIndex(PAGE_TWO_FACTOR)
         self.code.setFocus()
@@ -1046,12 +1077,66 @@ class GeoditDock(QDockWidget):
 
     def set_busy(self, busy: bool) -> None:
         self._busy = bool(busy)
-        for widget in (self.sign_in_btn, self.verify_btn, self.continue_btn, self.refresh_btn):
+        for widget in (self.continue_btn, self.refresh_btn):
             widget.setEnabled(not busy)
         for bar in (self.sign_in_busy, self.code_busy, self.projects_busy):
             bar.setVisible(busy)
-        self.sign_in_btn.setText("Signing in…" if busy else "Sign in")
-        self.verify_btn.setText("Verifying…" if busy else "Verify")
+        self._update_sign_in_btn()
+        self._update_verify_btn()
+
+    # ------------------------------------------------------- waits (a 429)
+    def hold_sign_in(self, identity: str, seconds: int) -> None:
+        """The server asked to wait ``seconds`` before signing in as
+        ``identity`` (``core.policy.login_identity``) again: Sign in counts
+        down while the form names that account. Another account isn't held."""
+        self._sign_in_hold = (identity, self._now() + max(1, int(seconds)))
+        self._hold_timer.start()
+        self._update_sign_in_btn()
+
+    def hold_verify(self, seconds: int) -> None:
+        """The server asked to wait ``seconds`` before the next code: Verify counts down."""
+        self._verify_until = self._now() + max(1, int(seconds))
+        self._hold_timer.start()
+        self._update_verify_btn()
+
+    def _left(self, deadline: float) -> int:
+        return max(0, math.ceil(deadline - self._now()))
+
+    def _sign_in_wait(self) -> int:
+        hold = self._sign_in_hold
+        if hold is None or hold[0] != login_identity(**self._identity_fields()):
+            return 0
+        return self._left(hold[1])
+
+    def _update_sign_in_btn(self, *_args) -> None:
+        wait = self._sign_in_wait()
+        if self._busy:
+            text = "Signing in…"
+        elif wait:
+            text = f"Try again in {format_wait(wait)}"
+        else:
+            text = "Sign in"
+        self.sign_in_btn.setEnabled(not self._busy and not wait)
+        self.sign_in_btn.setText(text)
+
+    def _update_verify_btn(self) -> None:
+        wait = self._left(self._verify_until)
+        if self._busy:
+            text = "Verifying…"
+        elif wait:
+            text = f"Try again in {format_wait(wait)}"
+        else:
+            text = "Verify"
+        self.verify_btn.setEnabled(not self._busy and not wait)
+        self.verify_btn.setText(text)
+
+    def _tick_holds(self) -> None:
+        self._update_sign_in_btn()
+        self._update_verify_btn()
+        hold = self._sign_in_hold
+        if self._left(max(hold[1] if hold else 0.0, self._verify_until)) == 0:
+            self._sign_in_hold = None
+            self._hold_timer.stop()
 
     def set_syncing(self, syncing: bool, quiet: bool = False) -> None:
         """``quiet``: a background tick (timer, after a save) — only the button
