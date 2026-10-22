@@ -42,8 +42,9 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
    Editor. Projects whose owner's plan has expired, and projects where the owner has turned the Map page off for
    your role, are hidden (a note under the list says how many and why). A project where **no survey area is
    assigned to you** is listed, marked in orange, but can't be opened — QGIS would have nothing to download;
-   clicking it says so. Assign yourself an area on the web Map page (Assign area), or ask the owner, then refresh
-   the list. The project appears as a group **Geodit – <project>** with:
+   clicking it says so. If you can edit the survey area (Settings → Web access → Map → Survey area), assign
+   yourself an area on the web Map page (Assign area); otherwise ask the project owner, or anyone who can edit
+   the survey area. Then refresh the list. The project appears as a group **Geodit – <project>** with:
    - **Survey area (assigned to you)**: read-only; orange = pending, green = completed. The map moves to it the
      first time it appears;
    - one editable layer per server layer. Each layer shows up as soon as it has downloaded (the first download
@@ -72,8 +73,10 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
    - A saved response shows what was saved: typed and layer defaults fill in a new response only, so a question
      left blank stays blank. A calculated answer is worked out from the answers it uses, and saved even where the
      response has none; it's worked out again when you change one of them.
-   - In a repeating page, each entry keeps its own ID number when an earlier entry is removed, and an entry you
-     add takes the response's number, the one on entry 1.
+   - In a repeating page, each entry gets its own ID number (Room 1 is RM-0007, Room 2 RM-0008) and keeps it
+     when an earlier entry is removed. An entry you add takes the next number. If another response took that
+     number meanwhile, the server renumbers the entry, and the form says so after saving ("Room ID 0008 is now
+     0011: 0008 was already used.").
    - What you may see and change follows the project's **Web access** settings (Settings → Web access), exactly
      as on the web, for owners, admins and editors alike: the **Map** page decides whether you can edit and delete
      features in the layers, and the **Data** page and the answer-sheet switches decide what you can do in the
@@ -91,11 +94,11 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
 - **Only features that touch your survey area sync** — at least part of the feature must be inside it, the same
   rule that decides which features download. Draw or move a feature entirely outside it and QGIS shows an error
   right away; the feature is held back and listed under *Needs attention* (click it to zoom to it). This applies
-  to everyone in QGIS — the team "off-site" permission only applies in the Android app.
+  to everyone, as in the Android app — the team "off-site" permission only lifts the app's GPS-tolerance check.
 - **If your survey area is unassigned while the project is open**, the project stays open with a warning: the
   layers become read-only, nothing new downloads, and changes you had already saved still upload. Once you go
   back to the project list it can't be opened again until an area is assigned to you.
-- **What you may change follows the project's Page access** (Settings → Page access → Map, set by the
+- **What you may change follows the project's Web access** (Settings → Web access → Map, set by the
   project owner; the owner can always do everything):
   - no Map *write*: the layers are **view only** — they are read-only in QGIS and nothing is uploaded;
   - Map *write* but no Map *delete*: you can add and edit features, but **deleted features are restored** on
@@ -128,8 +131,9 @@ them as soon as they're released, also add the Geodit plugin repository: **Setti
   - No comments thread, and no "Use my location" (a location answer can use **Pick on map** or the feature's
     location instead).
 - **You need an assigned area.** Everyone — owners, admins and editors included — syncs only the survey-area
-  polygons assigned to them, and can't open a project without one. Assign yourself an area on the web Map page
-  (Assign area).
+  polygons assigned to them, and can't open a project without one. If you can edit the survey area
+  (Settings → Web access → Map → Survey area), assign yourself an area on the web Map page (Assign area); otherwise
+  ask the project owner, or anyone who can edit the survey area.
 - **One project at a time.** Only one project syncs at a time per QGIS window.
 
 Local data lives under QGIS's app-data folder: `geodit/<server>/<user>/<project>/` — `project.gpkg` (your

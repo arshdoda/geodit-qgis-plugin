@@ -44,12 +44,15 @@ from ...forms.answers import (
     get_manual_text,
     get_option_label,
     is_manual_value,
+    js_string_of,
+    removed_choices,
     same_answer_value,
     stored_choice_list_length,
 )
 from ...forms.defaults import is_schema_unique_id
 from ...forms.jsnum import as_int_if_integral, is_number, js_number
 from ...forms.model import (
+    ID_INPUT_MAX,
     PARAGRAPH_ANSWER_MAX_LEN,
     TEXT_ANSWER_MAX_LEN,
     DefaultType,
@@ -60,8 +63,8 @@ from ...forms.model import (
 )
 from ...forms.phone import COUNTRIES, DEFAULT_COUNTRY, country_for, dial_code, split_phone, without_trunk_zero
 from ...forms.timezone import parse_wall_clock
-from ...forms.validation import js_len, text_length_range
-from ..theme import Theme, font, line_icon
+from ...forms.validation import js_len, rating_scale, rating_star_fill, text_length_range
+from ..theme import Theme, font, line_icon, rating_star_icon
 from ..widgets import Pill
 
 MEDIA_KIND = {
@@ -71,6 +74,9 @@ MEDIA_KIND = {
     QType.VIDEO: "video",
 }
 _MEDIA_ICON = {"image": "image", "document": "file", "audio": "audio", "video": "video", "signature": "pen"}
+SELECT_OPTION = "Select an option"
+# A stored pick naming what the question no longer has (FBUILD-24).
+REMOVED_OPTION = "Removed option"
 
 
 class EditorContext:
@@ -273,6 +279,13 @@ def sanitize_identity(raw: str, identity_type: Any) -> str:
     return raw.upper()
 
 
+def _id_digits(raw: str) -> str:
+    """``IdQuestion``'s input filter for a typed ID: its ASCII digits, as the
+    whole number they save as."""
+    digits = re.sub(r"[^0-9]", "", raw)
+    return str(int(digits)) if digits else ""
+
+
 class LineEditor(QuestionEditor):
     """TEXT, EMAIL, IDENTITY and ID: one line, with the web's input filter."""
 
@@ -280,6 +293,7 @@ class LineEditor(QuestionEditor):
         q = self.question
         self.edit = _field(QLineEdit())
         self.transform: Callable[[str], str] = lambda text: text
+        self.parse: Callable[[str], Any] = lambda text: text  # the answer the cleaned text holds
         self.computed = False
         self.cap: Optional[int] = None
         if q.q_type == QType.TEXT:
@@ -300,9 +314,13 @@ class LineEditor(QuestionEditor):
                 self.edit.setPlaceholderText("Generated automatically")
                 self.edit.setReadOnly(True)
             else:
+                # api-v2 stores an ID only as a whole number, so a typed one keeps
+                # its digits and holds the number it saves as, which it also
+                # shows ("007" reads 7); emptied, it holds None (RUNTIME-17).
                 self.edit.setPlaceholderText("Enter ID")
-                self.cap = 32
-                self.transform = lambda text: re.sub(r"[^A-Za-z0-9_-]", "", text)
+                self.cap = len(str(ID_INPUT_MAX))
+                self.transform = _id_digits
+                self.parse = lambda text: int(text) if text else None
         if self.cap is not None:
             _fit_max_length(self.edit, self.cap, "")
         self.edit.textEdited.connect(self._edited)
@@ -314,7 +332,7 @@ class LineEditor(QuestionEditor):
             position = self.edit.cursorPosition()
             self.edit.setText(clean)
             self.edit.setCursorPosition(min(position, len(clean)))
-        self.emit(clean)
+        self.emit(self.parse(clean))
 
     def show_value(self, value: Any) -> None:
         text = coerce_string(value)
@@ -542,31 +560,48 @@ class CounterEditor(QuestionEditor):
         self._refresh_buttons()
 
 
+class _StarButton(QToolButton):
+    """A rating's star. Qt sends a double click as press, release, double click,
+    release, and QWidget's default double-click handler presses the button
+    again: that second click would clear the rating the first one set, so it is
+    dropped, as the web drops a click whose ``detail`` is above 1."""
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API
+        event.accept()
+
+
 class RatingEditor(QuestionEditor):
     def build(self) -> None:
-        raw = self.question.attr("max_rating")
-        self.max_rating = max(1, int(raw) if is_number(raw) else 5)
+        self.max_rating = rating_scale(self.question.attributes)
         row = QHBoxLayout()
         row.setSpacing(4)
         self.stars: List[QToolButton] = []
         for star in range(1, self.max_rating + 1):
-            btn = QToolButton()
+            btn = _StarButton()
             btn.setProperty("variant", "icon")
             btn.setToolTip(f"{star} out of {self.max_rating}")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setIconSize(QSize(22, 22))
-            btn.clicked.connect(lambda _c=False, s=star: self.emit(s))
+            btn.clicked.connect(lambda _c=False, s=star: self._pick(s))
             row.addWidget(btn)
             self.stars.append(btn)
         row.addStretch(1)
         self.body.addLayout(row)
         self._paint(0)
 
+    def _pick(self, star: int) -> None:
+        # The current star again clears the rating, as on Android and the web.
+        # By value: a stored "3.0000" clears too, and on 3.5 star 3 sets 3. A
+        # clear is None, which an update sends in `clear` (api-v2 refuses "").
+        self.emit(None if coerce_numeric(self._value) == star else star)
+
     def _paint(self, current: float) -> None:
+        # A fraction (a calculated average, a layer attribute) part-fills its star.
         theme = self.ctx.theme
-        for i, btn in enumerate(self.stars, start=1):
-            filled = i <= current
-            btn.setIcon(line_icon("star", theme.accent if filled else theme.border, 22, filled=filled))
+        rtl = self.isRightToLeft()
+        for star, btn in enumerate(self.stars, start=1):
+            fill = rating_star_fill(current, star)
+            btn.setIcon(rating_star_icon(fill, theme.accent, theme.border, 22, right_to_left=rtl))
 
     def emit(self, value: Any) -> None:
         super().emit(value)
@@ -644,7 +679,11 @@ class DateTimeEditor(QuestionEditor):
 
 # ====================================================================== choices
 class DropdownEditor(QuestionEditor):
-    """The option's id as a string, or ``_manual_:<text>`` for "Enter Manually"."""
+    """The option's id as a string, or ``_manual_:<text>`` for "Enter Manually".
+    A stored answer naming what the question no longer has (a deleted option,
+    or the deleted "Enter Manually" of typed text, which then can't be edited)
+    reads "Removed option" in place of the placeholder until another option is
+    picked."""
 
     def build(self) -> None:
         self.combo = QComboBox()
@@ -657,12 +696,13 @@ class DropdownEditor(QuestionEditor):
         self.body.addWidget(self.combo)
         self.body.addWidget(self.manual)
         self._options: List[Option] = list(self.question.opt_list)
+        self._orphaned = False  # typed text whose "Enter Manually" was deleted
         self._fill()
 
     def _fill(self) -> None:
         self.combo.blockSignals(True)
         self.combo.clear()
-        self.combo.addItem("Select an option", None)
+        self.combo.addItem(SELECT_OPTION, None)
         for option in self._options:
             self.combo.addItem(get_option_label(option), str(option.id))
         self.combo.blockSignals(False)
@@ -679,7 +719,11 @@ class DropdownEditor(QuestionEditor):
     def _picked(self, index: int) -> None:
         data = self.combo.itemData(index)
         if data is None:
+            # The placeholder isn't an answer (the arrow keys and the wheel land
+            # on it too): show the current one again.
+            self._select(self._value)
             return
+        self.combo.setItemText(0, SELECT_OPTION)  # a pick replaces a removed option
         manual = self._manual_option()
         if manual is not None and data == str(manual.id):
             self.manual.setText("")
@@ -702,6 +746,11 @@ class DropdownEditor(QuestionEditor):
         else:
             index = self.combo.findData(current) if current else -1
             self.manual.hide()
+        # Judged against every option: one a rule hides isn't removed.
+        removed = bool(current) and bool(removed_choices([current], self.question.opt_list))
+        self._orphaned = removed and is_manual_value(current)
+        self.manual.setEnabled(not self._disabled and not self._orphaned)
+        self.combo.setItemText(0, REMOVED_OPTION if removed else SELECT_OPTION)
         self.combo.setCurrentIndex(index if index >= 0 else 0)
 
     def show_value(self, value: Any) -> None:
@@ -709,11 +758,14 @@ class DropdownEditor(QuestionEditor):
 
     def set_editable(self, editable: bool) -> None:
         self.combo.setEnabled(editable)
-        self.manual.setEnabled(editable)
+        self.manual.setEnabled(editable and not self._orphaned)
 
 
 class MultipleChoiceEditor(QuestionEditor):
-    """A list of option ids, a ``_manual_:<text>`` entry last."""
+    """A list of option ids, a ``_manual_:<text>`` entry last. What a stored
+    answer names that the question no longer has (a deleted option, or the
+    deleted "Enter Manually" of typed text, which then can't be edited) gets a
+    ticked "Removed option" row after the options, so it can be unticked."""
 
     def build(self) -> None:
         self.box = QVBoxLayout()
@@ -725,38 +777,65 @@ class MultipleChoiceEditor(QuestionEditor):
         self.body.addWidget(self.manual)
         self.checks: List[QCheckBox] = []
         self._options: List[Option] = list(self.question.opt_list)
-        self._fill()
+        self._removed: List[str] = []
+        self._orphaned = False  # typed text whose "Enter Manually" was deleted
+        self._fill(self._value)
 
-    def _fill(self) -> None:
+    def _fill(self, value: Any) -> None:
         for check in self.checks:
             self.box.removeWidget(check)
             check.deleteLater()
         self.checks = []
+        self._removed = self._removed_picks(value)
+        self._orphaned = any(is_manual_value(pick) for pick in self._removed)
         for option in self._options:
-            check = QCheckBox(get_option_label(option))
-            check.setProperty("option_id", str(option.id))
-            check.clicked.connect(lambda _c=False, oid=str(option.id): self._toggle(oid))
-            self.box.addWidget(check)
-            self.checks.append(check)
-        self._sync(self._value)
+            self._add_check(get_option_label(option), str(option.id))
+        for pick in self._removed:
+            self._add_check(REMOVED_OPTION, pick, removed=True)
+        self._sync(value)
         self.set_editable(not self._disabled)
+
+    def _add_check(self, label: str, oid: str, *, removed: bool = False) -> None:
+        check = QCheckBox(label)
+        check.setProperty("option_id", oid)
+        if removed:  # set apart, as on the web
+            check.setProperty("kind", "muted")
+            italic = font()
+            italic.setItalic(True)
+            check.setFont(italic)
+        check.clicked.connect(lambda _c=False, oid=oid: self._toggle(oid))
+        self.box.addWidget(check)
+        self.checks.append(check)
 
     def set_options(self, options: List[Option]) -> None:
         if [o.id for o in options] != [o.id for o in self._options]:
             self._options = list(options)
-            self._fill()
+            self._fill(self._value)
+
+    def _split(self, value: Any):
+        """The picks, as option-id strings, and the manual entry."""
+        raw = coerce_choice_list(value)
+        manual_entry = next((v for v in raw if is_manual_value(v)), None)
+        picks = [js_string_of(v) for v in raw if not is_manual_value(v)]
+        return picks, manual_entry
 
     def _parts(self):
-        raw = coerce_choice_list(self._value)
-        manual_entry = next((v for v in raw if is_manual_value(v)), None)
-        selected = [v for v in raw if not is_manual_value(v)]
-        return selected, manual_entry
+        return self._split(self._value)
+
+    def _removed_picks(self, value: Any) -> List[str]:
+        # Judged against every option: a pick a rule merely hides is still
+        # valid, and stays as it is, unseen.
+        picks, manual_entry = self._split(value)
+        typed = [] if manual_entry is None else [manual_entry]
+        return removed_choices([*picks, *typed], self.question.opt_list)
 
     def _toggle(self, option_id: str) -> None:
         selected, manual_entry = self._parts()
         manual_text = get_manual_text(manual_entry)
         manual = find_manual_option(self._options)
-        if manual is not None and option_id == str(manual.id):
+        if is_manual_value(option_id):  # the "Removed option" row of orphaned typed text
+            self.emit(selected)
+        elif manual is not None and option_id == str(manual.id):
             if manual_entry is not None:
                 self.emit(selected)
             else:
@@ -772,14 +851,15 @@ class MultipleChoiceEditor(QuestionEditor):
         self.emit([*selected, build_manual_value(text)])
 
     def _sync(self, value: Any) -> None:
-        raw = coerce_choice_list(value)
-        manual_entry = next((v for v in raw if is_manual_value(v)), None)
-        picks = [v for v in raw if not is_manual_value(v)]
+        if self._removed_picks(value) != self._removed:
+            self._fill(value)  # a stored value came in, or a removed pick was unticked
+            return
+        picks, manual_entry = self._split(value)
         selected = set(picks)
         manual = find_manual_option(self._options)
         for check in self.checks:
             oid = check.property("option_id")
-            is_manual = manual is not None and oid == str(manual.id)
+            is_manual = (manual is not None and oid == str(manual.id)) or is_manual_value(oid)
             check.setChecked(manual_entry is not None if is_manual else oid in selected)
         # The whole list is stored in one varchar(255), so the typed text gets
         # what the other picks leave (validation has the exact rule).
@@ -796,7 +876,7 @@ class MultipleChoiceEditor(QuestionEditor):
     def set_editable(self, editable: bool) -> None:
         for check in self.checks:
             check.setEnabled(editable)
-        self.manual.setEnabled(editable)
+        self.manual.setEnabled(editable and not self._orphaned)
 
 
 # ====================================================================== location

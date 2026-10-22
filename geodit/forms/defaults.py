@@ -27,7 +27,7 @@ from .answers import (
     js_string_of,
     to_manual_answer,
 )
-from .jsnum import as_int_if_integral, is_integer, is_number, js_number, js_round, js_str, js_trim
+from .jsnum import as_int_if_integral, is_decimal_literal, is_integer, is_number, js_number, js_round, js_str, js_trim
 from .model import MEDIA_QTYPES, DefaultType, Form, IdentityType, QType, Question
 from .rules import evaluate_condition
 from .timezone import normalize_wall_clock
@@ -143,10 +143,13 @@ def unique_value_to_string(value: Any, padding: Any) -> str:
 
 
 def unique_value_own(value: Any) -> Any:
-    """The numeric counter of a unique-id slot, or ``""``."""
+    """The numeric counter of a unique-id slot, or ``""``. Text holds one only
+    as a decimal number, as api-v2 (``configured_base``) and Android read a
+    Starting Value: a blank one, or a hex, octal or binary literal, holds none.
+    The web's ``Number`` still reads ``" "`` as 0 and ``"0x10"`` as 16."""
     if value is None or value == "":
         return ""
-    if not (is_number(value) or isinstance(value, str)):
+    if not (is_number(value) or (isinstance(value, str) and is_decimal_literal(value))):
         return ""
     number = js_number(value)
     return as_int_if_integral(number) if math.isfinite(number) else ""

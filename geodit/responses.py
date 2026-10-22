@@ -23,6 +23,7 @@ import datetime as _dt
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from qgis.core import (
@@ -40,6 +41,7 @@ from qgis.PyQt.QtWidgets import QDialog, QFileDialog, QMessageBox
 from .forms.answers import file_answer_from_value, is_absolute_media_url
 from .forms.decode import ans_items_to_answers
 from .forms.defaults import is_schema_unique_id
+from .forms.entry_numbering import describe_renumbered, renumbered_ids
 from .forms.jsnum import as_int_if_integral
 from .forms.media import media_spec
 from .forms.model import Form, QType, parse_form
@@ -357,9 +359,11 @@ class FeatureFormController:
         self.form: Optional[Form] = None
         self._form_cache: Dict[Tuple[str, int, int], Tuple[float, dict]] = {}
         self._team_cache: Dict[Tuple[str, int], Dict[int, str]] = {}
-        # (project, layer, feature) → a response created here, until the pull
-        # brings the feature's new `gd_ans_id`.
-        self._created: Dict[Tuple[int, int, int], int] = {}
+        # (project, layer, feature, form) → a response created here, until the
+        # pull brings the feature's new `gd_ans_id`. The form is part of the key:
+        # when a new form takes the layer, the server clears the feature's link,
+        # and a response made for the old form must not come back with the new one.
+        self._created: Dict[Tuple[int, int, int, int], int] = {}
         self._load_seq = 0
         self._saving = False
         self._saving_target: Optional[FeatureTarget] = None  # the feature whose save is running
@@ -429,7 +433,7 @@ class FeatureFormController:
         if info["form_id"] is None:
             plugin._message("No form is attached to this layer.", Qgis.MessageLevel.Info)
             return
-        ans_id = info["gd_ans_id"] or self._created.get((project.id, info["shp_id"], info["gd_id"]))
+        ans_id = info["gd_ans_id"] or self._created.get((project.id, info["shp_id"], info["gd_id"], info["form_id"]))
         if ans_id is None and not project.data.can_edit:
             plugin._message("No response has been collected for this feature yet.", Qgis.MessageLevel.Info)
             return
@@ -472,8 +476,8 @@ class FeatureFormController:
             self.window is not None
             and self.session is not None
             and shown is not None
-            and (shown.project_id, shown.layer_id, shown.fid, shown.gd_id, shown.ans_id)
-            == (target.project_id, target.layer_id, target.fid, target.gd_id, target.ans_id)
+            and (shown.project_id, shown.layer_id, shown.fid, shown.gd_id, shown.ans_id, shown.form_id)
+            == (target.project_id, target.layer_id, target.fid, target.gd_id, target.ans_id, target.form_id)
         )
 
     def _leave_upload(self, parent=None) -> bool:
@@ -553,9 +557,11 @@ class FeatureFormController:
         return bool(left)
 
     # ================================================================ load
-    def load(self, *, after_save: bool = False) -> None:
+    def load(self, *, after_save: bool = False, saved_note: str = "") -> None:
         """Read the form and the stored answers, then show them. ``after_save``:
-        the form stays on screen, still busy, and comes back on the same page."""
+        the form stays on screen, still busy, and comes back on the same page;
+        ``saved_note`` (a generated ID the server renumbered) goes beside its
+        "Saved"."""
         target = self.target
         project = self.plugin.project
         if target is None or project is None or self.window is None:
@@ -575,6 +581,8 @@ class FeatureFormController:
             self.window.show_loading(self._header(None))
 
         def work(client):
+            # A Draft form (`is_active` false) opens like a live one, as on the
+            # web map; only Android, which lists live forms, can't fill it in.
             payload = cached_payload or client.form_data(target.project_id, target.form_id)
             items: List[dict] = []
             rows: Optional[List[dict]] = None
@@ -596,6 +604,9 @@ class FeatureFormController:
                             team[member] = str(row.get("name") or row.get("username") or f"User {member}")
                 except (PermissionDenied, NotFound):
                     team = None
+            # Create only: latest-id reserves each schema-built id's next number
+            # for this session. An update asks once an entry is added
+            # (`_fetch_latest_counters`), never just because the form opened.
             latest: Dict[int, int] = {}
             if target.ans_id is None:
                 form = parse_form(payload)
@@ -609,6 +620,8 @@ class FeatureFormController:
 
         def done(result: Optional[LoadResult], exc) -> None:
             if seq != self._load_seq or self.window is None or self.target is not target:
+                if saved_note:  # the form moved on before the save's reload came back
+                    self._saved_elsewhere(target, saved_note)
                 return
             if exc is not None:
                 self.plugin._handle_call_error(exc)
@@ -617,25 +630,29 @@ class FeatureFormController:
                 else:
                     message = f"Couldn't load the form. {self.plugin._error_text(exc)}"
                 self.window.show_error(self._header(None), message, self.load)
+                if saved_note:
+                    self._saved_elsewhere(target, saved_note)
                 return
             if cached_payload is None:  # fetched now: a cache hit keeps its age
                 self._form_cache[form_key] = (time.time(), result.form_payload)
             if result.team is not None:
                 self._team_cache[(server, target.project_id)] = result.team
-            self._show(result, view)
+            self._show(result, view, saved_note)
             if isinstance(result.rows_error, PermissionDenied):
                 self.plugin._refresh_caps()  # the role changed under us, as after a refused save
 
         self.plugin._run("Geodit: loading the feature form", work, done)
 
-    def _show(self, result: LoadResult, view: Optional[Tuple[Any, int]] = None) -> None:
-        """``view``: the page tab and scroll position to come back to, after a save."""
+    def _show(self, result: LoadResult, view: Optional[Tuple[Any, int]] = None, saved_note: str = "") -> None:
+        """``view``: the page tab and scroll position to come back to, after a
+        save; ``saved_note`` goes beside its "Saved"."""
         target = self.target
         project = self.plugin.project
         form = parse_form(result.form_payload)
         if target.ans_id is None and result.latest:
-            # Create: each schema-built id continues from the latest submitted
-            # counter (patched into a copy of the form, as the web does).
+            # Create: each schema-built id starts at the number latest-id
+            # reserved (latest + 1, patched into a copy of the form, as the web
+            # does); further entries count up from it (`entry_numbering`).
             form = copy.deepcopy(form)
             for question in form.questions():
                 latest = result.latest.get(question.id, 0)
@@ -664,12 +681,17 @@ class FeatureFormController:
                     verified_on=_format_instant(row.get("verified_on")),
                 )
         initial = ans_items_to_answers(result.items, form) if target.ans_id is not None else None
-        self.session = FormSession(
+        session = FormSession(
             form,
             initial_answers=initial,
             feature_attributes=target.attributes,
             options=self._options(project.data if project else None, target),
         )
+        if target.ans_id is not None:
+            # An entry added to a stored response numbers its schema-built ids
+            # past the server's latest-id, asked for only then.
+            session.on_need_latest_counters = partial(self._fetch_latest_counters, session)
+        self.session = session
         if view is not None:
             for i, tab in enumerate(self.session.tabs):
                 if tab.key == view[0]:
@@ -677,7 +699,39 @@ class FeatureFormController:
         self.window.show_form(self.session, self._header(self.meta))
         if view is not None:
             self.window.scroll_to(view[1])
-            self.window.show_notice(f"Saved {time.strftime('%H:%M')}", "success")
+            saved = f"Saved {time.strftime('%H:%M')}"
+            self.window.show_notice(f"{saved}. {saved_note}" if saved_note else saved, "success")
+
+    def _fetch_latest_counters(self, session: FormSession, ques_ids: List[int]) -> None:
+        """An entry was added to a stored response's repeating page holding
+        these schema-built ids: ask latest-id for them, without holding the
+        form. Each ask reserves a number for this session, so it is never made
+        just because a response opened. Once the reply lands, the added entries
+        number past it; a failed ask leaves them past the response's own
+        highest number."""
+        target = self.target
+        if self.session is not session or target is None or target.ans_id is None:
+            return
+        project_id, form_id = target.project_id, target.form_id
+
+        def work(client):
+            latest: Dict[int, int] = {}
+            for ques_id in ques_ids:
+                try:
+                    latest[ques_id] = client.latest_id(project_id, form_id, ques_id)
+                except (ApiError, ValueError):
+                    pass  # as on create: a failed hint (an expired session too) only means no hint
+            return latest
+
+        def done(latest: Optional[Dict[int, int]], exc) -> None:
+            if exc is not None or not latest:
+                return
+            if self.session is not session or self.target is not target or self.window is None:
+                return  # saved, closed or replaced meanwhile
+            session.set_latest_counters(latest)
+            self.window.schedule_refresh()
+
+        self.plugin._run("Geodit: reading the next ID number", work, done)
 
     def _options(self, caps, target: FeatureTarget) -> SessionOptions:
         if caps is None:
@@ -820,17 +874,23 @@ class FeatureFormController:
             self._saving = False
             self._saving_target = None
             saved = exc is None and value[0] == "saved"
+            note = ""
             if saved:
                 # Recorded even when another feature is open by now: the link
                 # must survive until the pull brings the feature's gd_ans_id.
                 new_id = _int_or_none((value[1] or {}).get("ans_id")) or target.ans_id
                 if target.ans_id is None and new_id is not None:
-                    self._created[(target.project_id, target.shp_id, target.gd_id)] = new_id
+                    self._created[(target.project_id, target.shp_id, target.gd_id, target.form_id)] = new_id
                 self.plugin.request_sync("saved")
                 target.ans_id = new_id
+                # A schema-built id whose number was taken meanwhile is
+                # renumbered at save (`id_counters`): it is no longer the one
+                # shown, so say which.
+                echo = (value[1] or {}).get("id_counters")
+                note = describe_renumbered(renumbered_ids(answers, echo), session.ques_by_id)
             if self.window is None or self.target is not target or self.session is not session:
                 if saved:
-                    self._saved_elsewhere(target)
+                    self._saved_elsewhere(target, note)
                 else:
                     self._unsaved_elsewhere(target, exc)
                 return
@@ -849,15 +909,21 @@ class FeatureFormController:
             if self.target is target and self.window is not None and not self.window.isHidden():
                 # Still this feature's form: it stays on screen, busy, until the
                 # stored answers are back — then on the same page, with "Saved".
-                self.load(after_save=True)
+                self.load(after_save=True, saved_note=note)
             else:
-                self._saved_elsewhere(target)
+                self._saved_elsewhere(target, note)
 
         self.plugin._run("Geodit: saving the feature form", work, done)
 
-    def _saved_elsewhere(self, target: FeatureTarget) -> None:
-        """The save landed after its form was closed or moved on to another feature."""
-        self.plugin._message(f"Saved the response for feature {target.gd_id}.", Qgis.MessageLevel.Success, 3)
+    def _saved_elsewhere(self, target: FeatureTarget, note: str = "") -> None:
+        """The save landed after its form was closed or moved on to another
+        feature. ``note`` (a generated ID the server renumbered) stays until
+        dismissed: the number it names is no longer the one the form showed."""
+        text = f"Saved the response for feature {target.gd_id}."
+        if note:
+            self.plugin._message(f"{text} {note}", Qgis.MessageLevel.Success, 0)
+        else:
+            self.plugin._message(text, Qgis.MessageLevel.Success, 3)
 
     def _unsaved_elsewhere(self, target: FeatureTarget, exc: Optional[BaseException]) -> None:
         """The save failed after its form was closed or moved on to another
@@ -875,7 +941,7 @@ class FeatureFormController:
             if isinstance(exc, Conflict) and target.ans_id is None:
                 linked = exc.linked_ans_id
                 if linked is not None:
-                    self._created[(target.project_id, target.shp_id, target.gd_id)] = linked
+                    self._created[(target.project_id, target.shp_id, target.gd_id, target.form_id)] = linked
                 plugin.request_sync("saved")
                 reason = "someone else added a response to it first"
             elif isinstance(exc, (NetworkError, ServerError)) and target.ans_id is None:
@@ -909,7 +975,7 @@ class FeatureFormController:
             linked = exc.linked_ans_id
             plugin.request_sync("saved")
             if linked is not None:
-                self._created[(target.project_id, target.shp_id, target.gd_id)] = linked
+                self._created[(target.project_id, target.shp_id, target.gd_id, target.form_id)] = linked
             answer = QMessageBox.question(
                 window,
                 "This feature already has a response",
@@ -944,12 +1010,14 @@ class FeatureFormController:
             )
             return
         if isinstance(exc, NotFound) and target.ans_id is not None:  # 404, or 410 deleted
-            self._created.pop((target.project_id, target.shp_id, target.gd_id), None)
+            self._created.pop((target.project_id, target.shp_id, target.gd_id, target.form_id), None)
             plugin.request_sync("saved")
             window.set_submit_error("This response was deleted on the server. Sync to refresh the layer.")
             return
         if isinstance(exc, (ValidationFailed, ApiError)) and not isinstance(exc, (NetworkError, ServerError)):
-            details = "; ".join(m for msgs in exc.errors.values() for m in msgs) if exc.errors else ""
+            # A value no save can store names its answer under `errors` with the
+            # message's own text (api-v2 709a6fd): say it once.
+            details = "; ".join(m for msgs in exc.errors.values() for m in msgs if m != exc.message)
             window.set_submit_error(f"Couldn't save: {exc.message}" + (f" ({details})" if details else ""))
             return
         # A network or server failure: a create may still have landed (no
@@ -985,7 +1053,7 @@ class FeatureFormController:
                 meta.status, meta.verifier_id, meta.verified_on = previous
                 self.window.set_header(self._header(meta))
                 if isinstance(exc, NotFound):  # 404, or 410: deleted on the web
-                    self._created.pop((target.project_id, target.shp_id, target.gd_id), None)
+                    self._created.pop((target.project_id, target.shp_id, target.gd_id, target.form_id), None)
                     self.plugin.request_sync("saved")
                     self.notify("This response was deleted on the server. Sync to refresh the layer.", "warning")
                     return

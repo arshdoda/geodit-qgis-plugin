@@ -6,11 +6,18 @@
 ``edited_on`` is older than a drain that already passed that position. The
 next watermark therefore trails the pull's start by a margin longer than any
 writer transaction; re-delivered rows are applied idempotently.
+
+api-v2 (W2) also puts its own next ``last_fetched`` on every page: its time
+before that request's queries, minus its 6-minute overlap, read off the clock
+that stamps ``edited_on``. The earliest of ours and every page's is stored, so
+ours keeps its 15 minutes and the server can hold the window open (e.g. while
+a long import commits). Ours is always in the minimum, so a page without one
+(an older server) changes nothing.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Iterable, Optional
 
 MARGIN_MS = 15 * 60 * 1000
 # attr_head reaches clients through a cache (up to 1 h stale before api-v2's
@@ -19,8 +26,9 @@ MARGIN_MS = 15 * 60 * 1000
 SCHEMA_REWIND_MS = 75 * 60 * 1000
 
 
-def next_watermark(pull_start_ms: int) -> int:
-    return max(0, int(pull_start_ms) - MARGIN_MS)
+def next_watermark(pull_start_ms: int, server_marks: Iterable[Optional[int]] = ()) -> int:
+    marks = [int(m) for m in server_marks if m is not None]
+    return max(0, min([int(pull_start_ms) - MARGIN_MS, *marks]))
 
 
 def rewind(watermark: Optional[int], by_ms: int = SCHEMA_REWIND_MS) -> Optional[int]:

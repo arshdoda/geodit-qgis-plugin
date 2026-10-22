@@ -10,7 +10,7 @@ where ``error_code`` is the failing op's HTTP status. The server's contract
   vanished) — under last-write-wins the server delete stands, because the
   batch cannot update a soft-deleted row;
 * a create 404 means the layer itself is no longer live;
-* a 403 means the project's Page access doesn't let this user make that
+* a 403 means the project's Web access doesn't let this user make that
   change (desktop only). It is not the feature's fault, so the change is
   neither parked nor retried blindly: it stays pending until the user's
   permissions allow it (a denied delete is restored locally instead).
@@ -31,7 +31,7 @@ class ResultBuckets:
     discard: List[int] = field(default_factory=list)  # update 404 → local copy to __discarded
     orphaned_layer: bool = False  # create 404 → layer no longer live
     rejected: List[Tuple[int, int]] = field(default_factory=list)  # (gid, code) 400/422
-    denied: List[int] = field(default_factory=list)  # 403: Page access forbids this change
+    denied: List[int] = field(default_factory=list)  # 403: Web access forbids this change
     retry: List[int] = field(default_factory=list)  # transient or unanswered
 
 

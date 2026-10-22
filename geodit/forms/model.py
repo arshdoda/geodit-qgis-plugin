@@ -65,6 +65,7 @@ class IdentityType:
 MANUAL_ENTRY_OPTION = "_manual_"  # `ManualEntryOption` (services/form/detail/constant.ts)
 TEXT_ANSWER_MAX_LEN = 255
 PARAGRAPH_ANSWER_MAX_LEN = 2000
+ID_INPUT_MAX = 999_999_999  # the largest ID a person types: a typed ID takes 9 digits
 
 
 def _int(value: Any, default: int = 0) -> int:

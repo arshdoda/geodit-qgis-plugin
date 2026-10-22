@@ -3,9 +3,11 @@
 Port of geodit-ui ``runtime/form-validation.ts`` (``validateValue``,
 ``isEmptyForQuestion``, ``storableRangeError``, ``visibleOptionsFor``,
 ``flattenForCalc``) with the same messages, so an answer QGIS accepts is one the
-web accepts too. One deliberate difference: PHONE numbers are checked against
-the country calling code and the E.164 length (``phone.py``) — the web's
-libphonenumber is not available in QGIS's Python.
+web accepts too, and of the limits it reads from
+``services/form/detail/constant.ts`` (``textLengthRange``, ``ratingScale``,
+``ratingStarFill``). One deliberate difference: PHONE numbers are checked
+against the country calling code and the E.164 length (``phone.py``) — the
+web's libphonenumber is not available in QGIS's Python.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from .answers import (
     TabKey,
     coerce_choice_list,
     coerce_numeric,
-    file_answer_from_value,
+    coerce_string,
     get_manual_text,
     is_empty_answer,
     is_manual_value,
@@ -29,7 +31,7 @@ from .answers import (
     tab_key,
 )
 from .defaults import is_schema_unique_id
-from .jsnum import as_float, is_number, js_number, js_round, js_trim
+from .jsnum import as_float, is_integer, is_number, js_number, js_round, js_trim
 from .model import (
     MANUAL_ENTRY_OPTION,
     PARAGRAPH_ANSWER_MAX_LEN,
@@ -54,14 +56,19 @@ _DATE = re.compile(
 )
 _EMAIL = re.compile(r"[^\s@]+@(?:[^\s@.]+\.)+[A-Za-z]{2,}")
 _SPACES = re.compile(r"\s+")
+# JavaScript's `\d`: ASCII only (Python's takes other scripts' digits, which int() reads).
+_DIGITS = re.compile(r"[0-9]+")
 
 # What each numeric answer column can store: the whole-number columns can't go
 # negative, NUMBER is capped at 2^53 − 1, DECIMAL / MEASUREMENT are
 # numeric(15,4) (at most 11 digits before the point). Only DECIMAL may be
-# negative — a length or area can't.
+# negative — a length or area can't. RATING takes a fraction (user decision,
+# 2026-10-22): until api-v2 stores it as a decimal, its int4 column truncates
+# one (3.5 stores 3), but the range still holds.
 INT4_MAX = 2_147_483_647
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
-WHOLE_NUMBER_MAX = {QType.NUMBER: MAX_SAFE_INTEGER, QType.COUNTER: INT4_MAX, QType.RATING: INT4_MAX}
+WHOLE_NUMBER_MAX = {QType.NUMBER: MAX_SAFE_INTEGER, QType.COUNTER: INT4_MAX}
+FRACTION_MAX = {QType.RATING: INT4_MAX}
 DECIMAL_QTYPES = frozenset({QType.DECIMAL, QType.MEASUREMENT})
 DECIMAL_SCALE = 1e4
 DECIMAL_SCALED_LIMIT = 1e15
@@ -71,6 +78,10 @@ REQUIRED = "This question is required."
 # varchar(255) too: api-v2 measures them in code points (``len(str(value))``)
 # and rejects the whole save past it.
 CHAR_TOO_LONG = f"Maximum {TEXT_ANSWER_MAX_LEN} characters."
+# A RATING question's stars: at most 10 (the builder's cap, and Android's), and
+# 5 for one with no scale of its own (api-v2 seeds none).
+RATING_SCALE_MAX = 10
+RATING_SCALE_DEFAULT = 5
 
 
 def _js_date_valid(match: re.Match[str]) -> bool:
@@ -131,6 +142,24 @@ def text_length_range(attributes: Mapping[str, Any]) -> Dict[str, int]:
     return {"min": min_len, "max": max_len}
 
 
+def rating_scale(attributes: Mapping[str, Any]) -> int:
+    """A RATING question's scale: the stars every client draws and the most a
+    rating may be. The author's ``max_rating`` in whole stars (7.5 draws 7), at
+    most 10; 0, None or unset means 5. Android's ``parseRatingMaximum`` is the
+    same rule."""
+    maximum = attributes.get("max_rating")
+    if not (is_number(maximum) and maximum > 0):
+        return RATING_SCALE_DEFAULT
+    # Capped before truncating: an infinite scale is 10, as JavaScript reads it.
+    return RATING_SCALE_MAX if maximum >= RATING_SCALE_MAX else max(int(maximum), 1)
+
+
+def rating_star_fill(value: float, star: int) -> float:
+    """How much of star ``star`` (counted from 1) a rating of ``value`` fills,
+    from 0 to 1: 3.5 fills half the fourth."""
+    return min(1.0, max(0.0, value - (star - 1)))
+
+
 def is_empty_for_question(question: Question, value: Any) -> bool:
     if is_empty_answer(value):
         return True
@@ -152,8 +181,9 @@ def storable_range_error(question: Question, value: Any) -> Optional[str]:
     even for a read-only (calculated) question, whose value is still submitted."""
     q_type = question.q_type
     max_whole = WHOLE_NUMBER_MAX.get(q_type)
+    max_value = max_whole if max_whole is not None else FRACTION_MAX.get(q_type)
     is_decimal = q_type in DECIMAL_QTYPES
-    if max_whole is None and not is_decimal:
+    if max_value is None and not is_decimal:
         return None
     number = coerce_numeric(value)
     if number is None:
@@ -164,8 +194,8 @@ def storable_range_error(question: Question, value: Any) -> Optional[str]:
         return "Enter a whole number."
     if number < 0 and q_type != QType.DECIMAL:
         return f"Calculated value can't be negative{CHECK_CALC_INPUTS}" if calculated else "Must be at least 0."
-    if max_whole is not None and number > max_whole:
-        cap = format_en_in(max_whole)
+    if max_value is not None and number > max_value:
+        cap = format_en_in(max_value)
         return (
             f"Calculated value can't be more than {cap}{CHECK_CALC_INPUTS}" if calculated else f"Must be at most {cap}."
         )
@@ -197,7 +227,12 @@ def _range_error(attrs: Mapping[str, Any], number: float) -> Optional[str]:
 
 
 def validate_value(
-    question: Question, value: Any, *, read_only_editable: bool = False, stored_unchanged: bool = False
+    question: Question,
+    value: Any,
+    *,
+    read_only_editable: bool = False,
+    stored_unchanged: bool = False,
+    stored_value: Any = None,
 ) -> Optional[str]:
     """The error message for one answer, or None. ``read_only_editable`` is the
     answer sheet's "Edit read-only fields": an author-read-only question is then
@@ -205,8 +240,14 @@ def validate_value(
 
     ``stored_unchanged``: the response already stores this exact value here, so
     its stored length isn't checked again — the server holds it, and a legacy
-    shape can measure longer here than it does there. (The web checks it anyway,
-    which can block every save of such a response.)"""
+    shape can measure longer here than it does there.
+
+    ``stored_value``: what the response stores at this slot, when editing a
+    saved one. A choice naming an option the question no longer has (deleted
+    after the answer was saved) passes when it is stored here — the whole value
+    for DROPDOWN, per item for MULTIPLE_CHOICE, a manual entry included once
+    "Enter Manually" is gone. Otherwise every save of that response failed,
+    even an edit to another question (FBUILD-24). A new pick is still checked."""
     raw = question.attributes if isinstance(question.attributes, Mapping) else {}
     unlocked = bool(raw.get("read_only")) and read_only_editable
     if raw.get("read_only") and not unlocked:
@@ -248,15 +289,23 @@ def validate_value(
             return CHAR_TOO_LONG
         return None
     if q_type == QType.ID:
-        text = js_trim(value) if isinstance(value, str) else ""
         if is_schema_unique_id(attrs):
+            text = js_trim(value) if isinstance(value, str) else ""
             if attrs.get("mandatory") and not text:
                 return "Please fill in the referenced questions to generate this id."
             return None
-        if not text:
+        # api-v2 stores an ID only as a whole number in an int4 column; anything
+        # else fails the whole save (RUNTIME-17). The stored value is never
+        # re-sent, so a text row an old re-type left behind (RUNTIME-15) doesn't
+        # block the save.
+        if stored_unchanged:
             return None
-        if js_len(text) < 3:
-            return "ID must be at least 3 characters."
+        text = js_trim(js_string_of(value))
+        number = value if is_number(value) else js_number(text) if _DIGITS.fullmatch(text) else math.nan
+        if not is_integer(number) or number < 0:
+            return "Enter a whole number."
+        if number > INT4_MAX:
+            return f"Must be at most {format_en_in(INT4_MAX)}."
         return None
     if q_type == QType.NUMBER:
         number = _as_number(value)
@@ -274,9 +323,9 @@ def validate_value(
         number = _as_number(value)
         if not math.isfinite(number):
             return "Pick a rating."
-        max_rating = attrs.get("max_rating") if is_number(attrs.get("max_rating")) else 5
-        if number < 1 or number > max_rating:
-            return f"Pick a rating between 1 and {js_string_of(max_rating)}."
+        scale = rating_scale(attrs)
+        if number < 1 or number > scale:
+            return f"Pick a rating between 1 and {scale}."
         return storable_range_error(question, number)
     if q_type == QType.TEXT:
         if not isinstance(value, str):
@@ -305,30 +354,32 @@ def validate_value(
         if not ident:
             return None
         has_manual = any(o.value == MANUAL_ENTRY_OPTION for o in options)
+        kept = stored_value is not None and coerce_string(stored_value) == ident
         if is_manual_value(ident):
-            if not has_manual:
+            if not has_manual and not kept:
                 return "Select a valid option."
             if attrs.get("mandatory") and js_trim(get_manual_text(ident)) == "":
                 return "Type your manual answer."
             if not stored_unchanged and len(get_manual_text(ident)) > MANUAL_TEXT_MAX_LEN:
                 return f"Maximum {MANUAL_TEXT_MAX_LEN} characters."
             return None
-        if not any(str(o.id) == ident for o in options):
+        if not any(str(o.id) == ident for o in options) and not kept:
             return "Select a valid option."
         return None
     if q_type == QType.MULTIPLE_CHOICE:
         options = question.opt_list
         has_manual = any(o.value == MANUAL_ENTRY_OPTION for o in options)
         allowed = {str(o.id) for o in options}
+        kept = {js_string_of(v) for v in coerce_choice_list(stored_value)}
         items = coerce_choice_list(value)
         for item in items:
             if is_manual_value(item):
-                if not has_manual:
+                if not has_manual and item not in kept:
                     return "Selected option is no longer available."
                 if attrs.get("mandatory") and js_trim(get_manual_text(item)) == "":
                     return "Type your manual answer."
                 continue
-            if js_string_of(item) not in allowed:
+            if js_string_of(item) not in allowed and js_string_of(item) not in kept:
                 return "Selected option is no longer available."
         # The list is stored as one string (Python's `str(list)`) in a
         # varchar(255); past that the server rejects the whole save.
@@ -347,11 +398,6 @@ def validate_value(
             return "Latitude must be between -90 and 90."
         if not (is_number(lng) and math.isfinite(lng)) or lng < -180 or lng > 180:
             return "Longitude must be between -180 and 180."
-        return None
-    if q_type in (QType.IMAGE, QType.AUDIO, QType.VIDEO, QType.DOCUMENT, QType.SIGNATURE):
-        file = file_answer_from_value(value)
-        if file and not file["url"] and not file["key"]:
-            return "Upload did not complete. Try again."
         return None
     return None
 

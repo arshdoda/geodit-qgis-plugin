@@ -25,7 +25,8 @@ SERVER_URL = "https://prod.api.geodit.in/api/v2/"
 # Options → System → Environment.
 SERVER_URL_ENV = "GEODIT_SERVER_URL"
 # Downloads (web and Android edits) every minute; an idle tick is a handful of
-# cheap, unthrottled map calls. Uploads also start a few seconds after a save.
+# cheap map calls, far under the server's per-user request limit. Uploads also
+# start a few seconds after a save.
 DEFAULT_INTERVAL_MIN = 1
 _PREFIX = "geodit/"
 
@@ -53,6 +54,11 @@ class Config:
 
     def _set(self, key: str, value) -> None:
         self._s.setValue(_PREFIX + key, value)
+
+    def sync(self) -> None:
+        """Re-read what another QGIS window wrote meanwhile (the settings file is
+        shared; this process otherwise keeps the values it read first)."""
+        self._s.sync()
 
     # ---------------------------------------------------------------- server
     @property
@@ -157,8 +163,9 @@ class Config:
 
 
 class SecretStore:
-    """Refresh-token persistence in QGIS's encrypted auth database.
-    Main thread only — it can show the master-password dialog."""
+    """Refresh-token persistence in QGIS's encrypted auth database, which every
+    QGIS window of this profile shares. Main thread only — it can show the
+    master-password dialog — except ``load_unprompted``."""
 
     @staticmethod
     def _key(base_url: str) -> str:
@@ -189,6 +196,13 @@ class SecretStore:
         except Exception:  # noqa: BLE001
             return None
         return str(value) if value else None
+
+    def load_unprompted(self, base_url: str) -> Optional[str]:
+        """``load`` without ever prompting: None unless the master password was
+        given in this QGIS session already. Safe off the main thread (the auth
+        database keeps a connection per thread) once the main thread has used
+        the store."""
+        return self.load(base_url) if self.unlocked() else None
 
     def delete(self, base_url: str) -> None:
         am = QgsApplication.authManager()

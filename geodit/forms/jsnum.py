@@ -41,6 +41,12 @@ def js_trim(text: str) -> str:
     return text.strip(_JS_SPACE)
 
 
+def is_decimal_literal(text: str) -> bool:
+    """Whether ``text``, trimmed, is a decimal number: what ``Number`` reads as
+    one, less a blank (0), ``Infinity`` and a hex, octal or binary literal."""
+    return bool(_DECIMAL.match(js_trim(text)))
+
+
 def js_number(value: Any) -> float:
     """``Number(value)``. ``None`` reads as ``undefined`` (NaN)."""
     if value is None:

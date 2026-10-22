@@ -4,11 +4,14 @@
 they are Owner, Admin or Editor — the only roles that can use the plugin.
 Each row carries the owner-first ``role`` (int), a fresh ``is_expired`` (the
 owner's plan, same predicate as the server's 402 gate) and the Map row of the
-project's Page access (``web_access``):
+project's Web access (``web_access``):
 
 * ``can_view``   — Map read. Off: listed only so the picker can say why it's hidden.
 * ``can_edit``   — Map write: add and edit features.
 * ``can_delete`` — Map delete: delete features.
+* ``can_edit_areas`` — Survey area write (Web access → Map → Survey area):
+  assign and upload survey areas; the plugin only says who can. A server that
+  predates it doesn't send it: Map write stands in.
 
 and whether a survey-area polygon is assigned to the caller
 (``has_survey_area`` / ``has_assigned_area``). QGIS syncs only the assigned
@@ -16,7 +19,7 @@ polygons — owners included — so a project without one is listed but can't be
 opened. A server that predates the two flags sends neither: nothing is blocked.
 
 The ``data`` block is what the web answer sheet lets the caller do — the Data
-row of Page access plus the five answer-modal switches — and drives the
+row of Web access plus the five answer-modal switches — and drives the
 feature form exactly as it drives geodit-ui's map Data sheet (``DataCaps``). A
 server that predates it sends none: the feature form is then view only.
 
@@ -97,6 +100,7 @@ class ProjectInfo:
     can_view: bool = True
     can_edit: bool = True
     can_delete: bool = True
+    can_edit_areas: bool = True  # assign and upload survey areas on the web
     owner_name: str = ""
     # ``None``: the server didn't say (it predates the flags) — not a blocker.
     has_survey_area: Optional[bool] = None
@@ -131,6 +135,21 @@ class ProjectInfo:
     @property
     def area_label(self) -> str:
         return AREA_LABELS.get(self.area_blocker or "", "")
+
+    def area_request(self, no_survey_area: bool) -> str:
+        """How to get a survey area assigned, as the no-area hints say it.
+        Uploading one and assigning areas both take Survey area write on the
+        web (Web access → Map → Survey area)."""
+        if no_survey_area and self.can_edit_areas:
+            return "Upload one on the web Map page (Upload → As survey area) and assign yourself an area (Assign area)"
+        if no_survey_area:
+            return "Ask the project owner, or anyone who can edit the survey area, to upload one and assign you an area"
+        if self.can_edit_areas:
+            return "Assign yourself an area on the web Map page (Assign area)"
+        return (
+            "Ask the project owner, or anyone who can edit the survey area, to assign you an area "
+            "(web Map page → Assign area)"
+        )
 
     @property
     def can_open(self) -> bool:
@@ -200,6 +219,7 @@ def parse_desktop_projects(items: Iterable[Mapping]) -> List[ProjectInfo]:
         if pid in seen or role not in DESKTOP_ROLES:
             continue
         seen.add(pid)
+        can_edit = _flag(item, "can_edit", True)
         out.append(
             ProjectInfo(
                 id=pid,
@@ -207,8 +227,9 @@ def parse_desktop_projects(items: Iterable[Mapping]) -> List[ProjectInfo]:
                 role=role,
                 is_expired=_flag(item, "is_expired", False),
                 can_view=_flag(item, "can_view", True),
-                can_edit=_flag(item, "can_edit", True),
+                can_edit=can_edit,
                 can_delete=_flag(item, "can_delete", True),
+                can_edit_areas=_flag(item, "can_edit_areas", can_edit),
                 owner_name=str(item.get("owner_name") or ""),
                 has_survey_area=_opt_flag(item, "has_survey_area"),
                 has_assigned_area=_opt_flag(item, "has_assigned_area"),

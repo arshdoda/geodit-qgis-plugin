@@ -69,9 +69,9 @@ class Unauthorized(ApiError):
 
 
 class SessionExpired(Unauthorized):
-    """The refresh token is dead (expired, revoked, logged out elsewhere, or
-    its account is gone). The user must sign in again — a stored password is
-    never replayed."""
+    """The refresh token is dead (expired, revoked, logged out elsewhere, used
+    twice where the server rotates refresh tokens, or its account is gone). The
+    user must sign in again — a stored password is never replayed."""
 
     def default_message(self) -> str:
         return "Your session has expired. Please sign in again."

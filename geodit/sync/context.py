@@ -51,7 +51,7 @@ class SyncContext:
     modified: ModifiedLayers
     full_resync: bool = False
     push_enabled: bool = True
-    # The project's Page access (Map row) for this user; the Owner has both.
+    # The project's Web access (Map row) for this user; the Owner has both.
     can_edit: bool = True  # add and edit features
     can_delete: bool = True  # delete features — when off, local deletes are restored
     discard_local: bool = False  # "Discard unsynced changes": revert every layer to the server copy
@@ -76,7 +76,7 @@ class LayerReport:
     pending: int = 0
     discarded_total: int = 0
     restored: int = 0  # local deletes put back: deleting isn't allowed
-    denied: int = 0  # changes the server refused (403): Page access
+    denied: int = 0  # changes the server refused (403): Web access
     reverted: int = 0  # local changes dropped by "Discard unsynced changes"
     revert_skipped_unsaved: bool = False
     held: List[Tuple[int, str]] = field(default_factory=list)  # (fid, reason)

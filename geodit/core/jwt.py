@@ -52,3 +52,26 @@ def session_id(token: Optional[str]) -> Optional[int]:
         return int(sid) if sid is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def generation(token: Optional[str]) -> Optional[int]:
+    """A refresh token's generation within its session (``gen``, which api-v2's
+    rotation counts up; a token from sign-in, or from a server that doesn't
+    rotate, has none: 0). None when the token can't be read."""
+    if not token:
+        return None
+    try:
+        gen = decode_claims(token).get("gen", 0)
+    except ValueError:
+        return None
+    return gen if isinstance(gen, int) and not isinstance(gen, bool) else None
+
+
+def later_generation(token: Optional[str], than: Optional[str]) -> bool:
+    """``token`` is a later generation of ``than``'s session: the same session
+    id and a higher ``gen``."""
+    sid = session_id(token)
+    if sid is None or sid != session_id(than):
+        return False
+    gen, other = generation(token), generation(than)
+    return gen is not None and other is not None and gen > other

@@ -26,14 +26,18 @@ become snake_case — and names them in its docstring:
   (and its save payload, ``runtime/submitPayload.ts``)
 * ``calc_freeze`` — when a calculated answer stops recomputing
   (``runtime/calcFreeze.ts``)
+* ``entry_numbering`` — each repeating entry's own generated-ID number
+  (``runtime/entryNumbering.ts``)
 * ``media``      — the media-limits contract (``runtime/mediaLimits.ts``,
   ``convert/sniff.ts``, ``convert/keepRules.ts``)
 * ``exif``       — carrying capture time and GPS into a re-encoded JPEG
   (``convert/exif.ts``)
 
-Ported from geodit-ui 2b0e16c (2026-09-29), plus the fixes of its answer-runtime
-audit (``docs/audit/answer-runtime.md``: PR 1, 2, 4 and 7, and round 2) from
-geodit-ui's working tree of 2026-10-01, not yet committed there. When the web runtime
-changes, port the change here too; the unit tests carry the web's own test
-cases.
+Ported from geodit-ui 2b0e16c (2026-09-29), plus these fixes of its
+answer-runtime audit (``docs/audit/answer-runtime.md``): c5afea2 (PR 1, 2, 4 and
+7, and round 2), 8ec66fa (RUNTIME-14), d32e21d (RUNTIME-16), daae238
+(RUNTIME-17 and 18) and f050524 (RUNTIME-21). One reading follows api-v2
+rather than the web: ``unique_value_own`` reads a blank or hex Starting Value
+as none (the audit's RUNTIME-17 and 18 note). When the web runtime changes,
+port the change here too; the unit tests carry the web's own test cases.
 """

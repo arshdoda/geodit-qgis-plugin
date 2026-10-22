@@ -86,13 +86,15 @@ class StagedRow:
 @dataclass
 class SchemaChange:
     added_keys: List[str] = field(default_factory=list)
+    revived_keys: List[str] = field(default_factory=list)
     retired_keys: List[str] = field(default_factory=list)
+    newly_retired: List[str] = field(default_factory=list)  # retired by this call
     repaired_cols: List[str] = field(default_factory=list)
     deferred: bool = False
 
     @property
     def altered(self) -> bool:
-        return bool(self.added_keys or self.repaired_cols)
+        return bool(self.added_keys or self.revived_keys or self.repaired_cols)
 
 
 @dataclass
@@ -212,21 +214,35 @@ class LayerStore:
     def reconcile_schema(self, server_keys: Sequence[str], *, can_alter: bool) -> SchemaChange:
         """Follow the server's ``attr_head``. New keys get a column (and rewind
         the watermark); removed keys retire (kept locally, never sent); a synced
-        column the user deleted is re-added and refilled from ``base``."""
+        column the user deleted is re-added and refilled from ``base``.
+
+        A retired key that comes back starts empty, like a new key: api-v2
+        deletes a field's values with the field and moves no ``edited_on``, so
+        nothing would ever overwrite the old copies. A value changed here that
+        the server never had (it differs from ``base``) is kept, and uploaded.
+        Columns and values change only while the layer has no unsaved QGIS
+        edits (``can_alter``); until then a returning key stays retired."""
         change = SchemaChange()
         colmap = self.colmap()
         server_keys = list(server_keys)
+        was_retired = set(self.meta_json("retired", []))
         new_keys = [k for k in server_keys if k not in colmap]
+        revived = [k for k in server_keys if k in colmap and k in was_retired]
         change.retired_keys = [k for k in colmap if k not in server_keys]
+        change.newly_retired = [k for k in change.retired_keys if k not in was_retired]
         fields = self._layer_field_names()
-        missing = [colmap[k] for k in server_keys if k in colmap and colmap[k] not in fields]
-        if (new_keys or missing) and not can_alter:
+        missing = [colmap[k] for k in server_keys if k in colmap and k not in was_retired and colmap[k] not in fields]
+        if (new_keys or missing or revived) and not can_alter:
             change.deferred = True
-            new_keys, missing = [], []
+            change.retired_keys += revived
+            new_keys, missing, revived = [], [], []
         new_colmap = extend_colmap(colmap, new_keys)
         for key in new_keys:
             ddl.add_text_column(self.ds, self.shp_id, new_colmap[key])
             change.added_keys.append(key)
+        for key in revived:
+            # Idempotent; brings back, empty, a column dropped in QGIS while retired.
+            ddl.add_text_column(self.ds, self.shp_id, colmap[key])
         for col in missing:
             self.ds.GetLayerByName(self.table).CreateField(ddl.text_field(col))
             with transaction(self.ds):
@@ -243,13 +259,33 @@ class LayerStore:
             "retired": change.retired_keys,
         }
         with transaction(self.ds):
-            if change.added_keys:
+            if revived:
+                self._clear_returning([colmap[k] for k in revived])
+                change.revived_keys = revived
+            if change.added_keys or change.revived_keys:
                 values["watermark_ms"] = _opt_int_text(rewind(self.watermark()))
-                # The rewind re-delivers rows whose values for the new keys may
-                # have been dropped: they must be applied again, not skipped.
+                # The rewind re-delivers rows whose values for the new or
+                # returning keys may have been dropped: they must be applied
+                # again, not skipped.
                 exec_sql(self.ds, f"UPDATE {ddl.BASE} SET {ddl.EDITED} = NULL")  # nosec B608
             self.set_meta(values)
         return change
+
+    def _clear_returning(self, cols: Sequence[str]) -> None:
+        """Empty the columns of keys that came back: the feature table where it
+        still holds the last-synced value, then ``base`` and ``staged`` (an
+        unconfirmed create is re-based from its snapshot). The caller holds
+        the transaction."""
+        t = _q(self.table)
+        for col in cols:
+            c = _q(col)
+            exec_sql(
+                self.ds,
+                f"UPDATE {t} SET {c} = NULL WHERE {c} IS NOT NULL AND IFNULL({c}, '') = "  # nosec B608
+                f"IFNULL((SELECT b.{c} FROM {ddl.BASE} b WHERE b.fid = {t}.fid), '')",
+            )
+            for table in (ddl.BASE, ddl.STAGED):
+                exec_sql(self.ds, f"UPDATE {table} SET {c} = NULL WHERE {c} IS NOT NULL")  # nosec B608
 
     # ----------------------------------------------------------- change diff
     def _changed_predicate(self, left: str, right: str, cols: Sequence[str]) -> str:

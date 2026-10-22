@@ -13,7 +13,7 @@ then each new layer); ``apply_report`` at the end reloads what changed. While no
 survey area is assigned to the user (``area_blocked``) the layers are read-only:
 what was already changed still uploads, nothing new can be edited.
 
-It also applies the project's Page access (Map row) to the synced layers: no
+It also applies the project's Web access (Map row) to the synced layers: no
 Map write → the layers are read-only; no Map delete → deleting still works in
 QGIS (there is no per-layer "no delete" switch), but a warning explains that
 the sync engine restores deleted features.
@@ -166,7 +166,7 @@ class LayerManager:
         self.project = None
 
     def set_project(self, project: ProjectInfo) -> None:
-        """The open project's permissions changed (Page access, role). The
+        """The open project's permissions changed (Web access, role). The
         area block is left alone: the syncs decide it, the list may be stale."""
         if self.project is None or project.id != self.project.id:
             return

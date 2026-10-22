@@ -153,6 +153,7 @@ def stylesheet(t: Theme) -> str:
     active_border = _hex(mix(t.surface, t.accent, 0.5))
     return f"""
 QLabel[kind="muted"] {{ color: {_hex(t.muted)}; }}
+QCheckBox[kind="muted"] {{ color: {_hex(t.muted)}; }}
 QLabel[kind="section"] {{ color: {_hex(t.muted)}; }}
 QLabel[kind="link"] {{ color: {_hex(t.accent_text)}; }}
 
@@ -317,16 +318,41 @@ def _render_svg(svg: bytes, size: int, scale: float) -> QPixmap:
     return pix
 
 
-def line_icon(name: str, color: QColor, size: int = 16, *, filled: bool = False) -> QIcon:
+def _line_svg(name: str, color: QColor, filled: bool) -> bytes:
     body = _ICONS[name]
     fill = color.name() if filled else "none"
-    svg = (
+    return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="{fill}" '
         f'stroke="{color.name()}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
     ).encode()
+
+
+def line_icon(name: str, color: QColor, size: int = 16, *, filled: bool = False) -> QIcon:
+    svg = _line_svg(name, color, filled)
     icon = QIcon()
     for scale in (1.0, 2.0):
         icon.addPixmap(_render_svg(svg, size, scale))
+    return icon
+
+
+def rating_star_icon(fill: float, on: QColor, off: QColor, size: int = 16, *, right_to_left: bool = False) -> QIcon:
+    """One star of a rating, ``fill`` from 0 to 1 (``rating_star_fill``): full,
+    empty, or the filled star laid over the outline and cut off at the fraction
+    from the start edge (geodit-ui ``RatingStar``)."""
+    if fill >= 1:
+        return line_icon("star", on, size, filled=True)
+    if fill <= 0:
+        return line_icon("star", off, size)
+    outline, full = _line_svg("star", off, False), _line_svg("star", on, True)
+    width = size * fill
+    icon = QIcon()
+    for scale in (1.0, 2.0):
+        pix = _render_svg(outline, size, scale)
+        painter = QPainter(pix)  # in logical pixels: both pixmaps carry the scale
+        painter.setClipRect(QRectF(size - width if right_to_left else 0, 0, width, size))
+        painter.drawPixmap(0, 0, _render_svg(full, size, scale))
+        painter.end()
+        icon.addPixmap(pix)
     return icon
 
 

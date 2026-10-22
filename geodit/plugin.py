@@ -7,7 +7,7 @@ sync scheduler and the background tasks; the dock is its view and
 Who can use it: project Owners, Admins and Editors. The server refuses a
 desktop sign-in for anyone else, and ``projects/desktop/list`` answers 403 for
 a remembered session whose user lost those roles — the plugin then revokes the
-session and signs out. The list also carries each project's Page access (Map
+session and signs out. The list also carries each project's Web access (Map
 row): no Map write → the layers are read-only and nothing is uploaded; no Map
 delete → locally deleted features are restored by the sync engine.
 
@@ -29,7 +29,11 @@ Sessions: the server never collapses desktop sessions, so every one the plugin
 lets go of — signed out, replaced by a new sign-in, abandoned half-way, or
 lost when QGIS quits without "Stay signed in" — is logged out there too;
 otherwise it stays alive for 7–30 days. A 429 at sign-in holds the button
-until ``Retry-After`` has passed, for that account only.
+until ``Retry-After`` has passed, for that account only. A kept session's
+refresh token is stored again each time the server rotates it (api-v2
+EXPO-3), and each refresh first takes a newer one another QGIS window of the
+profile stored, so every window signed in to it shares it; a window never
+overwrites or deletes another window's stored sign-in.
 """
 
 from __future__ import annotations
@@ -44,18 +48,19 @@ from typing import Dict, List, Optional, Set
 
 from qgis.core import Qgis, QgsApplication, QgsMessageLog, QgsProject
 from qgis.gui import QgsApplicationExitBlockerInterface
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import QObject, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QPushButton
 
 from .config import Config, SecretStore
+from .core import jwt as jwt_claims
 from .core.clock import ServerClock
 from .core.policy import PLAN_EXPIRED_RETRY_S, backoff_delay, login_identity
 from .core.projects import AREA_NOT_ASSIGNED, ProjectInfo, hidden_counts, parse_desktop_projects, visible_projects
 from .core.status import FAILED, NOT_SYNCED, OK, PLAN_EXPIRED, RATE_LIMITED, Status, plural, sync_status
 from .core.web_access import resolve as resolve_web_access
 from .net.errors import ApiError, NotFound, PermissionDenied, RateLimited, ServerTooOld, SessionExpired
-from .net.tokens import TokenStore
+from .net.tokens import STORED_CURRENT, STORED_NONE, STORED_OLDER, TokenStore, stored_copy
 from .qgis_ui.dock import PAGE_PROJECTS, GeoditDock
 from .qgis_ui.feature_picker import FeaturePicker
 from .qgis_ui.layers import KIND_LAYER, PROP, LayerManager
@@ -70,6 +75,9 @@ SAVE_SYNC_DELAY_MS = 3_000
 CAPS_REFRESH_S = 3600
 QUEUED_SYNC_DELAY_MS = 1_500
 SLOW_TICK_S = 2.0  # a tick at least this slow is logged even when it changed nothing
+# QGIS replaces a stored value by deleting it first: a read in between finds
+# nothing, so an empty read of a kept session's token is tried once more.
+STORE_RETRY_S = 0.2
 _ICON = os.path.join(os.path.dirname(__file__), "icons", "geodit.svg")
 
 # A request that arrives while a sync runs waits for it; the strongest wins.
@@ -100,6 +108,39 @@ class _FormExitBlocker(QgsApplicationExitBlockerInterface):
 
     def allowExit(self) -> bool:  # noqa: N802 - QGIS API
         return self._forms.allow_exit()
+
+
+class _Rotations(QObject):
+    """Brings ``_Keeper.rotated`` from the refreshing thread to the main thread.
+    One for the plugin's life: a keeper is no QObject, as a sync thread logging
+    its session out drops the last reference to it."""
+
+    # A refresh on a worker thread got a new refresh token: the main thread stores it.
+    tokenRotated = pyqtSignal()
+
+
+class _Keeper:
+    """A kept ("Stay signed in") session's link to the password store, which
+    every QGIS window of this profile shares (``TokenStore.keep``). Made on the
+    main thread once this process has used the store there, so a sync thread
+    is never the auth database's first caller."""
+
+    def __init__(self, secrets: SecretStore, base_url: str, stored: Optional[str], rotations: _Rotations) -> None:
+        self._secrets = secrets
+        self._base_url = base_url
+        self._rotations = rotations
+        self.stored = stored  # main thread: the token last known to be in the store
+
+    def latest(self) -> Optional[str]:
+        """The stored token, read on the refreshing thread — never prompting."""
+        token = self._secrets.load_unprompted(self._base_url)
+        if token is None and self._secrets.unlocked():
+            time.sleep(STORE_RETRY_S)
+            token = self._secrets.load_unprompted(self._base_url)
+        return token
+
+    def rotated(self) -> None:
+        self._rotations.tokenRotated.emit()
 
 
 class GeoditPlugin:
@@ -135,6 +176,10 @@ class GeoditPlugin:
 
         self.timer = QTimer()
         self.timer.timeout.connect(lambda: self.request_sync("timer"))
+        self._rotations = _Rotations()
+        self._rotations.tokenRotated.connect(
+            lambda: self._keep_rotated(self.tokens), Qt.ConnectionType.QueuedConnection
+        )
         self.soon = QTimer()
         self.soon.setSingleShot(True)
         self.soon.timeout.connect(lambda: self.request_sync("saved"))
@@ -154,16 +199,16 @@ class GeoditPlugin:
         self._last_report: Optional[SyncReport] = None
         self._shown_status: Optional[Status] = None  # what the Sync card says: (state, headline, detail)
         # The open project's form names (form id → name), for the Data tool's
-        # list of which layer opens which form. Read once per project open.
+        # list of which layer opens which form. Read when the project opens, and
+        # again when a sync links a layer to a form they don't name.
         self._form_names: Dict[int, str] = {}
         self._form_names_project: Optional[int] = None
+        self._form_names_running = False
+        self._form_names_asked: frozenset = frozenset()  # the unnamed form ids the last re-read was for
         # Settings › Web access as last read, per project — for an older server
         # whose desktop list doesn't resolve them (``data``): project → blob.
         self._web_access: Dict[int, object] = {}
         self._session_dead = False
-        # The session's refresh token is in QGIS's password store ("Stay signed
-        # in"): it outlives QGIS. One that isn't is logged out on quitting.
-        self._session_kept = False
         self._shutting_down = False
         self._project_signals: List[tuple] = []
 
@@ -245,8 +290,16 @@ class GeoditPlugin:
         task = self._sync_task
         if task is not None:
             task.cancel()
+        tokens = self.tokens
+        if tokens.kept and not self._keep_at_exit(tokens):
+            # Its newest token couldn't be stored: end it and forget it, rather
+            # than leave a stale token that "Continue" would replay.
+            tokens.keep(None)
+            if not self._other_session_kept(tokens.session_id):
+                self.secrets.delete(self.base_url)
+                self.config.forget(self.base_url)
         # Nothing can resume a session that isn't kept once QGIS is gone.
-        logout = None if self._session_kept else self._end_session(self.tokens)
+        logout = None if tokens.kept else self._end_session(tokens)
         for running in (task, logout):
             if running is not None:
                 running.waitForFinished(3000)  # never an unbounded wait on exit
@@ -290,6 +343,7 @@ class GeoditPlugin:
         def done(value, exc):
             self._calls.discard(task)
             if not self._shutting_down:
+                self._keep_rotated(tokens)  # the queued save's backstop: retries one that failed
                 on_done(value, exc)
 
         task.on_done = done
@@ -353,7 +407,6 @@ class GeoditPlugin:
         self.clock = ServerClock()
         self.user_id = None
         self.worker_id = None
-        self._session_kept = False
         # ``_session_dead`` stays as it is: the new session, once ready, carries
         # on with a project the old one left open (``_on_session_ready``).
         self._backoff_until = self._rate_limit_until = self._push_paused_until = 0.0
@@ -444,7 +497,7 @@ class GeoditPlugin:
             return
         self.tokens.set_tokens(None, refresh)
         self.remember = True
-        self._session_kept = True  # it is the stored one
+        self._keep(self.tokens, refresh)  # it is the stored one
         self.dock.set_busy(True)
         self._after_login(resumed=True)
 
@@ -472,18 +525,23 @@ class GeoditPlugin:
             worker = cached_worker or c.register_device(device_uuid)
             return profile, worker, projects
 
-        self._run("Geodit: loading projects", work, functools.partial(self._on_session_ready, self.tokens, resumed))
+        # Read now: a logout in ``work`` empties the tokens.
+        sid = self.tokens.session_id
+        self._run(
+            "Geodit: loading projects", work, functools.partial(self._on_session_ready, self.tokens, resumed, sid)
+        )
 
-    def _on_session_ready(self, tokens: TokenStore, resumed: bool, value, exc) -> None:
+    def _on_session_ready(self, tokens: TokenStore, resumed: bool, sid: Optional[int], value, exc) -> None:
         if self.tokens is not tokens:
             if not resumed:  # never the remembered one: "Continue" still needs it
                 self._end_session(tokens)  # replaced while it loaded
             return
         if exc is not None:
             dead = isinstance(exc, (SessionExpired, PermissionDenied, ServerTooOld))
-            if dead:
+            if dead and not self._other_session_kept(sid):
                 # Dead, refused, or revoked just now by the job (403 / 404 from
-                # the project list): keeping "Continue as …" would only lead back here.
+                # the project list): keeping "Continue as …" would only lead back
+                # here — unless another QGIS window kept another sign-in since.
                 self.secrets.delete(self.base_url)
                 self.config.forget(self.base_url)
             if isinstance(exc, PermissionDenied) and self.project is not None:
@@ -510,10 +568,19 @@ class GeoditPlugin:
             self.dock.set_user(self.display_name)
         if not resumed:
             self._end_remembered_session()
-        self._session_kept = False
-        if self.remember and self.tokens.refresh_token:
+        keeper = self.tokens.keeper
+        if resumed and isinstance(keeper, _Keeper):
+            # The stored one stays kept, with its newest token — unless another
+            # QGIS window kept another sign-in meanwhile: "Continue as" must
+            # never name one account and hold another's token.
+            refresh = self.tokens.refresh_token
+            if refresh and self.secrets.unlocked():
+                self._store_kept(self.tokens, keeper, refresh)
+            if self.tokens.kept:
+                self.config.remember(self.base_url, self.user_id, self.display_name, self.tokens.session_id)
+        elif self.remember and self.tokens.refresh_token:
             if self.secrets.save(self.base_url, self.tokens.refresh_token):
-                self._session_kept = True
+                self._keep(self.tokens, self.tokens.refresh_token)
                 self.config.remember(self.base_url, self.user_id, self.display_name, self.tokens.session_id)
             else:
                 self._message(
@@ -564,6 +631,79 @@ class GeoditPlugin:
         stored = self.secrets.load(self.base_url)  # None when nothing is stored, or the prompt is cancelled
         if stored and stored != self.tokens.refresh_token:
             self._end_session(TokenStore(None, stored))
+
+    # ------------------------------------------------------- kept session
+    def _keep(self, tokens: TokenStore, stored: str) -> None:
+        """``tokens`` is the session "Stay signed in" keeps — it outlives QGIS;
+        one that isn't is logged out on quitting — and ``stored`` its token in
+        the password store. From now on every refresh shares the newest token
+        with the store."""
+        tokens.keep(_Keeper(self.secrets, self.base_url, stored, self._rotations))
+
+    def _keep_rotated(self, tokens: TokenStore) -> None:
+        """Store the kept session's new refresh token where "Stay signed in"
+        keeps it, so the next "Continue", and every QGIS window signed in to
+        it, uses that one. Queued from the refreshing thread (for the current
+        session: an earlier one's is no longer kept), and called again after
+        each task. Never asks for the master password: while the store is
+        locked, a later call stores it."""
+        keeper = tokens.keeper
+        if self._shutting_down or tokens is not self.tokens or not isinstance(keeper, _Keeper):
+            return
+        refresh = tokens.refresh_token
+        if not refresh or tokens.is_dead or refresh == keeper.stored or not self.secrets.unlocked():
+            return
+        self._store_kept(tokens, keeper, refresh)
+
+    def _store_kept(self, tokens: TokenStore, keeper: _Keeper, refresh: str, *, final: bool = False) -> bool:
+        """Put ``refresh`` in the store, unless it holds this generation or a
+        later one already (another window rotated). True when it holds ours.
+        Another session's token there means another QGIS window kept another
+        sign-in: this session is no longer kept, so quitting ends it. An empty
+        store (signed out in another window) decides that only as QGIS quits."""
+        stored = self.secrets.load(self.base_url)
+        if stored is None and final:
+            time.sleep(STORE_RETRY_S)
+            stored = self.secrets.load(self.base_url)
+        copy = stored_copy(refresh, stored)
+        if copy == STORED_CURRENT:
+            keeper.stored = refresh
+            return True
+        if copy == STORED_OLDER:
+            if self.secrets.save(self.base_url, refresh):
+                keeper.stored = refresh
+                return True
+            return False  # tried again after the next task
+        if copy == STORED_NONE and not final:
+            return False
+        tokens.keep(None)
+        return False
+
+    def _keep_at_exit(self, tokens: TokenStore) -> bool:
+        """QGIS quits: store the kept session's last token once a refresh in
+        flight has landed — a queued save may never run now. False when the
+        store can't hold it."""
+        refresh = tokens.settled_refresh(3)  # never an unbounded wait on exit
+        keeper = tokens.keeper
+        if not isinstance(keeper, _Keeper) or not refresh or tokens.is_dead:
+            return False
+        if refresh == keeper.stored:
+            return True
+        return self.secrets.unlocked() and self._store_kept(tokens, keeper, refresh, final=True)
+
+    def _other_session_kept(self, sid: Optional[int]) -> bool:
+        """The password store holds another session than ``sid``'s: another
+        QGIS window kept another sign-in, which deleting would lose. Told by
+        the stored token when the store is open, otherwise by the session id
+        remembered with it; False when it can't be told."""
+        if sid is None:
+            return False
+        stored = self.secrets.load_unprompted(self.base_url)
+        if stored is not None:
+            return jwt_claims.session_id(stored) != sid
+        self.config.sync()
+        remembered = self.config.remembered(self.base_url)
+        return remembered is not None and remembered.session_id is not None and remembered.session_id != sid
 
     def _openable(self, project_id: Optional[int]) -> Optional[ProjectInfo]:
         return next((p for p in self.projects if p.id == project_id and p.can_open), None)
@@ -624,7 +764,7 @@ class GeoditPlugin:
             self._refresh_caps()
 
     def _refresh_caps(self) -> None:
-        """Re-read the project list quietly — role and Page-access changes —
+        """Re-read the project list quietly — role and Web access changes —
         without leaving the page the user is on."""
         if self._caps_call_running or self.user_id is None or self._session_dead:
             return
@@ -680,8 +820,10 @@ class GeoditPlugin:
     def _with_web_access(self, project: ProjectInfo) -> ProjectInfo:
         """An older server's row narrowed by the project's Web access settings
         as last read, resolved as the web does (``core.web_access``) — never
-        wider than the server's Map flags. A row the server resolved itself
-        (``data``) is taken as it is."""
+        wider than the server's Map flags. Such a server doesn't send Survey
+        area write either, so ``can_edit_areas`` (Map write, its fallback)
+        narrows with Map write. A row the server resolved itself (``data``) is
+        taken as it is."""
         if project.data_known or project.id not in self._web_access:
             return project
         map_caps, data = resolve_web_access(project.role, self._web_access[project.id])
@@ -690,6 +832,7 @@ class GeoditPlugin:
             can_view=project.can_view and map_caps.can_view,
             can_edit=project.can_edit and map_caps.can_edit,
             can_delete=project.can_delete and map_caps.can_delete,
+            can_edit_areas=project.can_edit_areas and map_caps.can_edit,
             data=data,
         )
 
@@ -726,9 +869,11 @@ class GeoditPlugin:
     def _lost_desktop_access(self, exc: BaseException) -> None:
         """The user is no longer an Owner/Admin/Editor anywhere: sign out."""
         self.close_project(show_list=False)
+        sid = self.tokens.session_id  # before the logout empties the tokens
         self._end_session(self.tokens)
-        self.secrets.delete(self.base_url)
-        self.config.forget(self.base_url)
+        if not self._other_session_kept(sid):
+            self.secrets.delete(self.base_url)
+            self.config.forget(self.base_url)
         self.tokens = TokenStore()
         self.user_id = None
         self._show_signed_out(self._error_text(exc))
@@ -754,20 +899,23 @@ class GeoditPlugin:
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.close_project(show_list=False)
+        sid = self.tokens.session_id  # before the logout empties the tokens
         # The logout task captures the current TokenStore; the next session gets a fresh one.
         self._end_session(self.tokens)
-        self.secrets.delete(self.base_url)
-        self.config.forget(self.base_url)
+        if not self._other_session_kept(sid):
+            self.secrets.delete(self.base_url)
+            self.config.forget(self.base_url)
         self.tokens = TokenStore()
         self.user_id = None
         self._show_signed_out()
 
     def _on_session_expired(self) -> None:
         self._session_dead = True
-        self._session_kept = False  # no longer stored
+        self.tokens.keep(None)  # nothing to store any more
         self._queued = None
         self.timer.stop()
-        self.secrets.delete(self.base_url)
+        if not self._other_session_kept(self.tokens.session_id):
+            self.secrets.delete(self.base_url)
         self._message(
             "Your Geodit session has expired. Sign in again to keep syncing — local edits are kept.",
             Qgis.MessageLevel.Warning,
@@ -1007,12 +1155,13 @@ class GeoditPlugin:
                 return  # a sync of a project that is no longer open
             self.layers.apply_layer_event(event)
             if event.kind == "survey_area":
-                self._on_area_state(event.area_blocked)
+                self._on_area_state(event.area_blocked, event.no_survey_area)
         except Exception:  # noqa: BLE001 - never raise into Qt's event loop
             self._log(traceback.format_exc(), Qgis.MessageLevel.Warning)
 
-    def _on_area_state(self, blocked: bool) -> None:
-        """A sync's answer on whether a survey area is assigned to the user."""
+    def _on_area_state(self, blocked: bool, no_survey_area: bool) -> None:
+        """A sync's answer on whether a survey area is assigned to the user
+        (``no_survey_area``: the project has none at all)."""
         project = self.project
         if project is None:
             return
@@ -1022,8 +1171,13 @@ class GeoditPlugin:
             return
         self._area_blocked_seen = blocked
         # Patch the list entry, so the picker marks (or frees) the project
-        # without waiting for the hourly list refresh.
-        patched = replace(project, has_assigned_area=not blocked, has_survey_area=True if not blocked else None)
+        # without waiting for the hourly list refresh. A change between the
+        # two blocked kinds waits for it.
+        patched = replace(
+            project,
+            has_assigned_area=not blocked,
+            has_survey_area=False if no_survey_area else (True if not blocked else None),
+        )
         self.projects = [patched if p.id == project.id else p for p in self.projects]
         self.project = patched
         if blocked:
@@ -1056,6 +1210,7 @@ class GeoditPlugin:
         self._sync_task = None
         if self._shutting_down:
             return
+        self._keep_rotated(task.tokens)  # the queued save's backstop: retries one that failed
         try:
             self._apply_sync_result(task)
         finally:
@@ -1129,7 +1284,7 @@ class GeoditPlugin:
         if report.canceled:
             notes.append(("info", "Sync was canceled."))
         if report.area_checked:
-            self._on_area_state(report.area_blocked)
+            self._on_area_state(report.area_blocked, report.no_survey_area)
         for shp_id in [k for k, lr in report.layers.items() if lr.orphaned and self.layers.is_removed(k)]:
             del report.layers[shp_id]  # the user removed it while this sync ran
         self.layers.apply_report(report)
@@ -1144,6 +1299,7 @@ class GeoditPlugin:
         if completed:
             self.dock.set_issues(report)  # a layer removed on the server is listed there
             self._push_form_layers()
+            self._read_new_form_names()
         if report.permission_denied:
             self._refresh_caps()
 
@@ -1168,12 +1324,15 @@ class GeoditPlugin:
     def _report_notes(report: SyncReport, project: ProjectInfo) -> List[tuple]:
         notes: List[tuple] = []
         if report.area_blocked:
+            if report.no_survey_area:
+                lead = "This project has no survey area"
+            else:
+                lead = "No survey area is assigned to you in this project"
             notes.append(
                 (
                     "warning",
-                    "No survey area is assigned to you in this project, so nothing downloads and the layers are "
-                    "read-only. Changes you already saved still upload. Ask the project owner to assign you an "
-                    "area (web Map page → Assign area), then click Sync now.",
+                    f"{lead}, so nothing downloads and the layers are read-only. Changes you already saved still "
+                    f"upload. {project.area_request(report.no_survey_area)}, then click Sync now.",
                 )
             )
         restored = report.restored_total
@@ -1191,7 +1350,7 @@ class GeoditPlugin:
             notes.append(
                 (
                     "warning",
-                    f"The server refused {plural(denied, 'change')}: your role's Page access for the Map doesn't "
+                    f"The server refused {plural(denied, 'change')}: your role's Web access for the Map doesn't "
                     "allow them. Your changes stay on this computer; checking your permissions again.",
                 )
             )
@@ -1274,7 +1433,9 @@ class GeoditPlugin:
         if self._form_names_project != project_id:
             self._form_names = {}
             self._form_names_project = project_id
+            self._form_names_asked = frozenset()
         tokens = self.tokens
+        self._form_names_running = True
 
         def work(client):
             names: Dict[int, str] = {}
@@ -1286,6 +1447,7 @@ class GeoditPlugin:
             return names
 
         def done(names, exc) -> None:
+            self._form_names_running = False
             # Signed out (a logout empties that session's tokens: a late 401 is
             # no news) or another project open now — this reply is stale.
             if self.tokens is not tokens or self.project is None or self.project.id != project_id:
@@ -1297,6 +1459,18 @@ class GeoditPlugin:
             self._push_form_layers()
 
         self._run("Geodit: reading form names", work, done)
+
+    def _read_new_form_names(self) -> None:
+        """A sync linked a layer to a form the names don't include (made on the
+        web since they were read): read them again. Once per such set, since a
+        deleted form's id is never named — ``mobile/shp-list`` serves it until
+        a new form takes the layer."""
+        if self.project is None or self._form_names_running:
+            return
+        unknown = frozenset(form_id for _, form_id in self.layers.form_layers() if form_id not in self._form_names)
+        if unknown and unknown != self._form_names_asked:
+            self._form_names_asked = unknown
+            self._read_form_names(self.project.id)
 
     def _push_form_layers(self) -> None:
         """Which layer opens which form, for the Data tool — layers without a form left out."""

@@ -1,7 +1,7 @@
 """One sync tick for one project — runs in a worker thread.
 
 Order: layer list → survey area → local housekeeping → push → pull → prune.
-Housekeeping applies the project's Page access before anything is sent: when
+Housekeeping applies the project's Web access before anything is sent: when
 the user may not delete features, rows they deleted locally are restored from
 the last-synced copy (it has to happen before the pull, which would otherwise
 skip the row as "deleted locally" and move the watermark past any server edit
@@ -194,7 +194,11 @@ class SyncEngine:
         for i, (info, store) in enumerate(active):
             self._progress(50 + 45 * i / max(1, len(active)), f"Downloading {info.name}")
             layer_report = report.layers[info.id]
-            if info.id in ctx.modified:
+            if info.id in ctx.modified or layer_report.schema_deferred:
+                # A schema change waiting for the layer's edits to be saved
+                # lands before its next download (the user may have saved since
+                # the check): read under the old schema, the new or returning
+                # fields' values would be dropped and the watermark moved past them.
                 layer_report.pull_skipped_unsaved = True
                 continue
             if assigned is not None:  # None: no area assigned — keep what we have, pull nothing
@@ -264,7 +268,9 @@ class SyncEngine:
             if (store.meta("form_id") or "") != form_id:
                 store.set_meta({"form_id": form_id})
             change = store.reconcile_schema(info.attr_keys, can_alter=info.id not in self.ctx.modified)
-            layer_report.schema_changed = change.altered or bool(change.retired_keys)
+            # Once per retirement: each report reloads the layer's fields in
+            # QGIS, which resets open attribute tables and forms.
+            layer_report.schema_changed = change.altered or bool(change.newly_retired)
             layer_report.schema_deferred = change.deferred
             active.append((info, store))
         # Local layers the server no longer lists: keep the data, stop syncing.
@@ -398,10 +404,10 @@ class SyncEngine:
         layer_report = report.layers[info.id]
         g_type = int(info.g_type or 0)
         # QGIS syncs only what touches the user's assigned survey area — for
-        # everyone: unlike the Android app, the team "offsite" flag is not
-        # honoured here. With no survey area (or nothing assigned, and nothing
-        # assigned before) new and moved features can't be placed;
-        # attribute-only edits still go out.
+        # everyone, as on Android (the team "offsite" flag only relaxes
+        # Android's GPS-distance check, which the plugin doesn't have). With no
+        # survey area (or nothing assigned, and nothing assigned before) new and
+        # moved features can't be placed; attribute-only edits still go out.
         if fence is None:
             no_area = (
                 "This project has no survey area yet — features can't be added or moved from QGIS"
@@ -500,7 +506,7 @@ class SyncEngine:
             )
             layer_report.pushed += len(buckets.acked) + len(buckets.deleted)
             if buckets.denied:
-                # Page access refused these changes: they stay pending (not
+                # Web access refused these changes: they stay pending (not
                 # parked), and the plugin re-reads the user's permissions.
                 layer_report.denied += len(buckets.denied)
                 report.permission_denied = True
@@ -542,6 +548,7 @@ class SyncEngine:
         # fetch it again in full, like a newly assigned one.
         plan = feat_list_fetch_plan(assigned, store.drained_geoms() - set(reshaped), watermark)
         pull_start = self.client.clock.now_ms()
+        server_marks: List[Optional[int]] = []  # each page's own next `last_fetched` (api-v2 W2)
         seen: Optional[Set[int]] = set() if ctx.full_resync else None
         for fetch in plan:
             cursor: Optional[str] = None
@@ -561,6 +568,7 @@ class SyncEngine:
                     last_fetched=fetch.last_fetched or 0,
                     cursor=cursor,
                 )
+                server_marks.append(page.watermark)
                 if page.results:
                     self._apply_page(info, store, g_type, page.results, layer_report, seen)
                 if not page.cursor:
@@ -570,7 +578,7 @@ class SyncEngine:
             removed = store.ghost_cleanup(seen)
             layer_report.removed_remote += removed
             layer_report.rows_changed = layer_report.rows_changed or bool(removed)
-        store.finish_pull(next_watermark(pull_start), assigned)
+        store.finish_pull(next_watermark(pull_start, server_marks), assigned)
 
     def _apply_page(
         self, info: LayerInfo, store: LayerStore, g_type: int, rows, layer_report: LayerReport, seen

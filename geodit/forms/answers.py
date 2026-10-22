@@ -1,7 +1,8 @@
 """Answer values, manual entry and choice labels.
 
 Port of geodit-ui ``utils/answers.ts``, ``runtime/manualEntry.ts``,
-``utils/choice-display.ts`` and the media-answer helpers of ``runtime/types.ts``.
+``runtime/removedChoices.ts``, ``utils/choice-display.ts`` and the media-answer
+helpers of ``runtime/types.ts``.
 
 An answer value is one of: ``str``, a number, a ``list`` of option-id strings
 (MULTIPLE_CHOICE), ``{"lat", "lng"}`` (LOCATION), ``{"url", "key", "name"}``
@@ -271,6 +272,16 @@ def to_manual_answer(value: str) -> Optional[str]:
     if value == MANUAL_ENTRY_OPTION:
         return build_manual_value("")
     return None
+
+
+def removed_choices(picks: Iterable[str], all_options: Sequence[Option]) -> List[str]:
+    """The parts of a choice answer that name nothing the question still has:
+    an option deleted after the answer was saved, or a typed answer whose
+    "Enter Manually" option was deleted (FBUILD-24). Pass EVERY option of the
+    question: one a rule hides is still an option, and its pick a valid answer."""
+    ids = {str(o.id) for o in all_options}
+    has_manual = find_manual_option(all_options) is not None
+    return [pick for pick in picks if (not has_manual if is_manual_value(pick) else pick not in ids)]
 
 
 def canonical_choice_order(values: Sequence[Any], options: Sequence[Option]) -> List[Any]:

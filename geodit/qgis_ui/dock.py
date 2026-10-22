@@ -53,7 +53,7 @@ from qgis.PyQt.QtWidgets import (
 
 from ..config import RememberedUser
 from ..core.policy import format_wait, login_identity
-from ..core.projects import HiddenCounts, ProjectInfo
+from ..core.projects import AREA_NO_SURVEY_AREA, HiddenCounts, ProjectInfo
 from ..core.status import plural
 from ..sync.context import SyncReport
 from .theme import NAVY, Theme, device_scale, font, line_icon, logo_pixmap, mix, role_tone, stylesheet
@@ -629,10 +629,10 @@ class GeoditDock(QDockWidget):
 
     @staticmethod
     def _blocked_text(project: ProjectInfo) -> str:
+        ask = project.area_request(project.area_blocker == AREA_NO_SURVEY_AREA)
         return (
             f"{project.name}: {project.area_label}. QGIS syncs only the survey-area polygons assigned to you. "
-            "Assign yourself an area on the web Map page (Assign area), or ask the project owner, then refresh "
-            "this list."
+            f"{ask}, then refresh this list."
         )
 
     @staticmethod
@@ -890,7 +890,7 @@ class GeoditDock(QDockWidget):
         if self._area_blocked:
             text = "Read-only — no survey area is assigned to you in this project."
         elif not project.can_edit:
-            text = "View only — your role can't edit map features in this project (Settings → Page access)."
+            text = "View only — your role can't edit map features in this project (Settings → Web access)."
         elif not project.can_delete:
             text = "You can add and edit features, but not delete them."
         else:

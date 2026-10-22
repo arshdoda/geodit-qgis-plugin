@@ -112,7 +112,9 @@ class ProjectStore:
         for poly in sorted(polygons, key=lambda p: p.gid):
             geo_digest.update(f"{poly.gid}:".encode() + poly.wkb)
             full_digest.update(f"{poly.gid}:{int(poly.completed)}:".encode() + poly.wkb)
-            full_digest.update(json.dumps(dict(poly.attrs), sort_keys=True).encode())
+            # The values the table shows, key by key: a field deleted and added
+            # again (its values gone on the server) still rewrites its column.
+            full_digest.update(json.dumps([[k, poly.attrs.get(k)] for k in keys]).encode())
             poly_digests[str(poly.gid)] = hashlib.sha1(poly.wkb, usedforsecurity=False).hexdigest()
         geo_hex, full_hex = geo_digest.hexdigest(), full_digest.hexdigest()
         geometry_changed = geo_hex != self.meta("sa_geo_digest")

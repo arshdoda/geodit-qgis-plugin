@@ -1,8 +1,9 @@
 """One open feature form: ``FormRenderer``'s state and submit pipeline, without the UI.
 
-Port of geodit-ui ``components/forms/runtime/FormRenderer.tsx`` and its save
-payload (``runtime/submitPayload.ts``) as the answer sheet mounts it (embedded,
-no draft, no cover screen, PREVIOUS defaults off).
+Port of geodit-ui ``components/forms/runtime/FormRenderer.tsx``, its save
+payload (``runtime/submitPayload.ts``) and its generated-ID numbering
+(``runtime/entryNumbering.ts``, in ``entry_numbering``) as the answer sheet
+mounts it (embedded, no draft, no cover screen, PREVIOUS defaults off).
 The Qt window renders what this object says and forwards every edit to it, so
 the rules, defaults, validation and the save payload are exactly the web's:
 
@@ -17,16 +18,17 @@ the rules, defaults, validation and the save payload are exactly the web's:
   "Visible to surveyor" unless this viewer may see hidden items (then tagged
   and never required);
 * ``prepare_submit`` — validate every tab, check AT_LEAST / UNIQUE, build the
-  payload (update: the edited slots, plus any calculation over a blank stored
-  slot, and each schema-built id's own counter; ``clear`` for erased slots and
-  for removed repeating-page entries) and the uniqueness groups to probe.
+  payload (create: every repeating entry with its own schema-built id number;
+  update: the edited slots, plus any calculation over a blank stored slot, and
+  each schema-built id's own counter; ``clear`` for erased slots and for
+  removed repeating-page entries) and the uniqueness groups to probe.
 """
 
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .answers import (
     Answers,
@@ -37,7 +39,6 @@ from .answers import (
     get_answer,
     has_answer,
     is_empty_answer,
-    remap_key_list,
     remap_page_keys,
     same_answer_value,
     set_answer_at,
@@ -51,6 +52,16 @@ from .defaults import (
     is_schema_unique_id,
     resolve_shapefile_default,
     unique_value_own,
+)
+from .entry_numbering import (
+    EntryOrdinals,
+    clamp_counter,
+    counter_starts,
+    is_generated_id,
+    next_entry_ordinal,
+    remap_entry_ordinals,
+    seed_entry_ordinals,
+    with_entry_ordinal,
 )
 from .jsnum import is_number, js_number
 from .model import DefaultType, Form, Option, Page, QType, Question
@@ -245,9 +256,25 @@ class FormSession:
         self.errors: Dict[SlotKey, str] = {}
         self.server_unique_keys: Set[SlotKey] = set()
         self.cleared_calc_keys: Set[SlotKey] = set()
-        # Per repeating page, the keys of entries added this session: on an
-        # update, the only entries a schema-built id counter is given to.
-        self.added_entry_keys: Dict[int, List[int]] = {}
+        # Schema-built ids number every entry on its own (``entry_numbering``):
+        # a create numbers each entry, an update only the entries added this
+        # session, past the stored highest and the server's latest-id. The one
+        # "create or update?" reading, shared with the payload: an update diffs
+        # against the stored answers ({} included), a create has none.
+        self._baseline_at_open: Optional[Answers] = self.submit_baseline if self.options.submit_changed_only else None
+        self.creating = self._baseline_at_open is None
+        # Each live entry's place in the order this session numbered it, frozen
+        # per entry and remapped with every removal.
+        self.entry_ordinals: EntryOrdinals = seed_entry_ordinals(
+            [p.id for p in form.page_list], self.page_keys_by_page_id, self.creating
+        )
+        self.latest_counters: Dict[int, Any] = {}
+        self.counter_starts_by_ques: Dict[int, int] = counter_starts(form.questions(), self._baseline_at_open, None)
+        # The host's ``onNeedLatestCounters``: an entry was added to a stored
+        # response's page holding these schema-built ids, so fetch their
+        # latest-id (asking reserves a number, so never just because it opened).
+        self.on_need_latest_counters: Optional[Callable[[List[int]], None]] = None
+        self._latest_asked: Set[int] = set()
         self.validation_attempted = False
         self.tab_index = 0
         self.rule_submit_error: Optional[str] = None
@@ -382,21 +409,30 @@ class FormSession:
         self._presentation()
         self._invalidate()
 
-    def _validate(self, question: Question, value: Any, page_key: Optional[int] = None) -> Optional[str]:
-        # The value the response already stores at this slot isn't measured
-        # against the column again (``validate_value``'s ``stored_unchanged``).
-        baseline = self.submit_baseline if self.options.submit_changed_only else None
-        stored_unchanged = (
-            page_key is not None
-            and baseline is not None
-            and has_answer(baseline, question.id, page_key)
-            and same_answer_value(get_answer(baseline, question.id, page_key), value)
+    def set_latest_counters(self, latest: Mapping[int, Any]) -> None:
+        """The server's latest-id arrived for schema-built ids (an update that
+        added an entry): the entries this session numbers start past it too."""
+        self.latest_counters = {**self.latest_counters, **latest}
+        self.counter_starts_by_ques = counter_starts(
+            self.form.questions(), self._baseline_at_open, self.latest_counters
         )
+        self._invalidate()
+
+    def _validate(self, question: Question, value: Any, page_key: Optional[int] = None) -> Optional[str]:
+        # What the response already stores at this slot: that value isn't
+        # measured against the column again, and a choice it names stays valid
+        # after its option is deleted (``validate_value``'s ``stored_unchanged``
+        # and ``stored_value``). An entry a removal renumbers is compared with
+        # what its new key stored, so its picks count as new, as on the web.
+        baseline = self.submit_baseline if self.options.submit_changed_only else None
+        stored = page_key is not None and baseline is not None and has_answer(baseline, question.id, page_key)
+        stored_value = get_answer(baseline, question.id, page_key) if stored else None
         return validate_value(
             question,
             value,
             read_only_editable=self.options.allow_read_only_edit,
-            stored_unchanged=stored_unchanged,
+            stored_unchanged=stored and same_answer_value(stored_value, value),
+            stored_value=stored_value,
         )
 
     def _invalidate(self) -> None:
@@ -450,8 +486,9 @@ class FormSession:
                 view = flatten_for_calc(current, self.form, question.page_id, pk, hidden)
                 if kind == "uniqueId":
                     # Around the entry's own counter, which a removal moves with
-                    # it; with none, the form's next number shows (and a create
-                    # saves it). The counter is the one Save stores.
+                    # it, else the number this session gave the entry; with
+                    # neither, the form's own value shows (a create's first
+                    # entry saves it). The counter is the one Save stores.
                     counter = self.entry_counter(question, pk)
                     computed = compute_unique_id(question.attributes, view, self.form, counter)
                 else:
@@ -587,18 +624,24 @@ class FormSession:
     def entry_counter(self, question: Question, page_key: int) -> Any:
         """The counter a schema-built id slot carries, which it also shows
         (``entryCounter``): the entry's own, read from the raw answers that a
-        removal moves with it; for an entry added this session, the response's
-        number — entry 1's counter, as a create gives every entry the same one;
-        otherwise None. An existing entry that never had a counter is never
-        given one, nor is an entry added to a response whose entry 1 has none:
-        the form's ``unique_value`` is only the next number on a create."""
+        removal moves with it; else the number this session gave the entry, its
+        question's start plus its ordinal (``entry_numbering``); else None. So
+        every entry of a create is numbered, and of a stored response only the
+        entries added this session: an existing entry that never had a counter
+        is never given one, and without a start (nothing stored, no latest-id)
+        an added entry gets none. A create's first entry returns None when its
+        number is the form's own ``unique_value``: it then shows and saves that
+        value as configured (a legacy text Starting Value keeps its padding)."""
         own = unique_value_own(get_answer(self.answers, question.id, page_key))
         if own != "":
             return own
-        if page_key not in self.added_entry_keys.get(question.page_id, ()):
+        start = self.counter_starts_by_ques.get(question.id)
+        ordinal = self.entry_ordinals.get(question.page_id, {}).get(page_key)
+        if start is None or ordinal is None:
             return None
-        first = unique_value_own(get_answer(self.answers, question.id, 1))
-        return None if first == "" else first
+        if self.creating and ordinal == 0 and start == unique_value_own(question.attr("unique_value")):
+            return None
+        return clamp_counter(start + ordinal)
 
     def visible_options(self, question: Question, page_key: int) -> List[Option]:
         return visible_options_for(question, self.evaluation, tab_key(question.page_id, page_key))
@@ -840,20 +883,38 @@ class FormSession:
 
     def add_entry(self, page_id: int) -> bool:
         """The ⧉ action: a new blank entry of a repeating page, which becomes
-        the current tab."""
+        the current tab. Its schema-built ids take the page's next ordinal."""
         if not self.can_add_entry(page_id):
             return False
         keys = self.page_keys_by_page_id.get(page_id, [1])
         new_key = (max(keys) if keys else 0) + 1
         self._edited = True
         self.page_keys_by_page_id = {**self.page_keys_by_page_id, page_id: [*keys, new_key]}
-        self.added_entry_keys = {**self.added_entry_keys, page_id: [*self.added_entry_keys.get(page_id, []), new_key]}
+        self.entry_ordinals = with_entry_ordinal(
+            self.entry_ordinals, page_id, new_key, next_entry_ordinal(self.entry_ordinals, page_id)
+        )
         self._invalidate()
         for i, tab in enumerate(self.tabs):
             if tab.page_id == page_id and tab.page_key == new_key:
                 self.tab_index = i
                 break
+        self._ask_latest_counters(page_id)
         return True
+
+    def _ask_latest_counters(self, page_id: int) -> None:
+        """An entry added to a stored response numbers its schema-built ids past
+        the server's latest-id too. Asking reserves a number server-side, so
+        the host is asked only now, once per question; a failed ask leaves the
+        numbers past the response's own highest."""
+        if self.creating or self.on_need_latest_counters is None:
+            return
+        page = self.page_by_id.get(page_id)
+        wanted = [
+            q.id for q in (page.ques_list if page else []) if is_generated_id(q) and q.id not in self._latest_asked
+        ]
+        if wanted:
+            self._latest_asked.update(wanted)
+            self.on_need_latest_counters(wanted)
 
     def remove_entry(self, page_id: int, page_key: int) -> bool:
         """The × action: drop an added entry and resequence the rest to 1..N.
@@ -888,11 +949,7 @@ class FormSession:
         self.cleared_calc_keys = {s for s in (remap_slot(k) for k in self.cleared_calc_keys) if s is not None}
         self.errors = {remap_slot(k): v for k, v in self.errors.items() if remap_slot(k) is not None}  # type: ignore[misc]
         self.page_keys_by_page_id = {**self.page_keys_by_page_id, page_id: resequenced}
-        if page_id in self.added_entry_keys:
-            self.added_entry_keys = {
-                **self.added_entry_keys,
-                page_id: remap_key_list(self.added_entry_keys[page_id], remap),
-            }
+        self.entry_ordinals = remap_entry_ordinals(self.entry_ordinals, page_id, remap)
         self._invalidate()
         # Focus: the removed tab falls back to entry 1 of its page; any other
         # tab stays put under its new key.
@@ -1059,23 +1116,40 @@ class FormSession:
                     unchanged = is_empty_answer(value) if is_empty_answer(base) else same_answer_value(base, value)
                     if unchanged:
                         continue
-                    if value is None:  # held something, holds nothing now: erase
+                    # Held something, holds nothing now: erase. An ID's "" too:
+                    # api-v2 stores ids only as whole numbers.
+                    if value is None or (question.q_type == QType.ID and is_empty_answer(value)):
                         cleared.append({"ques_id": ques_id, "page_key": page_key})
                         continue
-                if is_schema_id:  # a create: every entry gets the form's next number
-                    submit = unique_value_own(question.attr("unique_value"))
+                if is_schema_id:
+                    # A create gives each entry its own number; the first
+                    # entry's is the form's own ``unique_value`` (entry_counter).
+                    counter = self.entry_counter(question, page_key)
+                    submit = counter if counter is not None else unique_value_own(question.attr("unique_value"))
                 elif question.q_type == QType.DATETIME:
                     submit = normalize_wall_clock(value) or value
                 else:
                     submit = value
+                # An ID is stored only as a whole number, and api-v2 never
+                # numbers a slot that sent none: a blank one sends nothing, as
+                # does a generated one with no number (no Starting Value and
+                # nothing stored yet; RUNTIME-17, 18).
+                if question.q_type == QType.ID and is_empty_answer(submit):
+                    continue
                 out.append({"ques_id": ques_id, "page_key": page_key, "value": submit})
         # Schema-built ids on update. A counter belongs to its entry, and the raw
         # answers move it when a removal renumbers the entries, so a shifted
-        # entry keeps its own id rather than the one stored at its new key.
+        # entry keeps its own id rather than the one stored at its new key; an
+        # entry added this session carries its own new number (R6b).
         # Write the counter wherever it differs from the one stored at that key;
         # where the entry has none, erase the stored one (it was the removed
-        # entry's). The display may be missing (a blank prefix input) while the
-        # counter still has to follow the entry, so this walks every live key.
+        # entry's). A blank or text row goes too where the entry now on the key
+        # doesn't hold it: api-v2 stores ids only as integers, so such a row is
+        # a stale one a re-type left behind (RUNTIME-16). Only a removal drops a
+        # stored slot from the raw answers, so an untouched Save still sends
+        # nothing for one; presence, not emptiness, tells them apart. The display
+        # may be missing (a blank prefix input) while the counter still has to
+        # follow the entry, so this walks every live key.
         if baseline is not None:
             for question in self.form.questions():
                 if question.q_type != QType.ID or not is_schema_unique_id(question.attributes):
@@ -1088,13 +1162,23 @@ class FormSession:
                     if counter is not None:
                         if counter != stored:
                             out.append({"ques_id": question.id, "page_key": page_key, "value": counter})
-                    elif stored != "" and has_answer(self.opened.answers, question.id, page_key):
+                    elif has_answer(self.opened.answers, question.id, page_key) and (
+                        stored != ""
+                        or (
+                            not has_answer(self.answers, question.id, page_key)
+                            and has_answer(baseline, question.id, page_key)
+                        )
+                    ):
                         cleared.append({"ques_id": question.id, "page_key": page_key})
         # Stored rows the form no longer holds. An entry removed from a repeating
         # page strands the rows of its old (top) key: keys live at open, gone
         # now. And the removal renumbers the entries after it (an entry added
         # later reuses a freed key), so a live key can lack an answer it stored:
         # seeding copies every stored slot, so only a renumber leaves one out.
+        # Blank rows go too (RUNTIME-14): an emptied answer is stored as "" or
+        # "[]", and every stored key makes a tab, so a blank row left behind
+        # keeps its entry, and one whose answers were all emptied could never
+        # be removed.
         # Erasing is the dangerous direction, so both read the removal off what
         # the form held when it OPENED: a key, or a slot, it never held is never
         # erased. Rule-hidden slots keep their stored rows, as the first pass
@@ -1110,8 +1194,6 @@ class FormSession:
                 opened_keys = set(opened.page_keys.get(question.page_id, [1]))
                 is_schema_id = question.q_type == QType.ID and is_schema_unique_id(question.attributes)
                 for page_key in sorted(baseline[ques_id]):
-                    if is_empty_answer(baseline[ques_id][page_key]):
-                        continue
                     if page_key in live_keys:
                         if (
                             is_schema_id

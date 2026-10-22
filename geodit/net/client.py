@@ -50,6 +50,7 @@ class LoginResult:
 class Page:
     results: List[dict]
     cursor: Optional[str]  # cursor of the NEXT page, None when drained
+    watermark: Optional[int] = None  # the server's next `last_fetched` (api-v2 W2); None before W2
 
 
 def _ids_param(ids: Iterable[int]) -> str:
@@ -121,7 +122,7 @@ class ApiClient:
                 raise SessionExpired()
         return self._decode(resp)
 
-    def _send(self, method, url, payload, token, feedback) -> HttpResponse:
+    def _send(self, method, url, payload, token, feedback, *, cancellable: bool = True) -> HttpResponse:
         headers = {"Accept": "application/json", "X-Client-Type": CLIENT_TYPE}
         if payload is not None:
             headers["Content-Type"] = "application/json"
@@ -129,7 +130,9 @@ class ApiClient:
             headers["Authorization"] = f"Bearer {token}"
         started = time.monotonic()
         try:
-            resp = self.transport.request(method, url, headers, payload, feedback or self.feedback)
+            resp = self.transport.request(
+                method, url, headers, payload, (feedback or self.feedback) if cancellable else None
+            )
         finally:
             self.requests += 1
             self.request_seconds += time.monotonic() - started
@@ -169,9 +172,12 @@ class ApiClient:
 
     def _refresh_access(self, refresh_token: str) -> Tuple[str, str]:
         # In the JSON body, never the URL: a query string lands in request and
-        # access logs, and a refresh token is a 7-30 day credential.
+        # access logs, and a refresh token is a 7-30 day credential. Never
+        # aborted when the task is canceled: a server that rotates refresh
+        # tokens has already replaced this one, and its answer is the only copy
+        # of the next.
         body = json.dumps({"refresh": refresh_token}).encode("utf-8")
-        resp = self._send("POST", self.url("user/refresh"), body, None, None)
+        resp = self._send("POST", self.url("user/refresh"), body, None, None, cancellable=False)
         if resp.status in (400, 401, 403):
             raise SessionExpired()
         if resp.status == 404 and isinstance(self._json(resp), dict):
@@ -227,8 +233,9 @@ class ApiClient:
     def logout(self) -> None:
         """End the session on the server, best effort: with no access token
         (a stored session) it refreshes first, as ``/user/logout`` needs a
-        Bearer. Never raises an API error — it must not replace the error a
-        caller logs out for."""
+        Bearer — the token sent is then a generation behind, which the server
+        takes (any generation names the session). Never raises an API error —
+        it must not replace the error a caller logs out for."""
         refresh = self.tokens.refresh_token
         try:
             if refresh and not self.tokens.is_dead:
@@ -261,6 +268,14 @@ class ApiClient:
             return data["results"]
         return []
 
+    @staticmethod
+    def _page(data) -> Page:
+        body = data if isinstance(data, dict) else {}
+        mark = body.get("watermark")
+        if not isinstance(mark, int) or isinstance(mark, bool) or mark < 0:
+            mark = None
+        return Page(ApiClient._as_list(data), cursor_from_next(body.get("next")), mark)
+
     def project_detail(self, proj_id: int) -> dict:
         """The project as the web reads it: ``survey_settings.web_access`` (the
         Web access settings, ``null`` when none are set) is what the plugin needs."""
@@ -269,7 +284,7 @@ class ApiClient:
 
     def projects_desktop(self) -> List[dict]:
         """Map projects where the user is Owner/Admin/Editor, with a fresh
-        ``is_expired`` and the Map row of Page access. 403 when the user holds
+        ``is_expired`` and the Map row of Web access. 403 when the user holds
         none of those roles on any project (QGIS is not for them)."""
         return self._as_list(self.call("GET", "projects/desktop/list"))
 
@@ -284,7 +299,7 @@ class ApiClient:
             params={"survey_area_id": survey_area_id, "last_fetched": 0, "cursor": cursor},
             feedback=feedback,
         )
-        return Page(self._as_list(data), cursor_from_next((data or {}).get("next")))
+        return self._page(data)
 
     def sa_feat_attrs(self, proj_id: int, survey_area_id: int, geom_ids: Sequence[int], feedback=None) -> List[dict]:
         if not geom_ids:
@@ -322,7 +337,7 @@ class ApiClient:
             },
             feedback=feedback,
         )
-        return Page(self._as_list(data), cursor_from_next((data or {}).get("next")))
+        return self._page(data)
 
     def feat_attrs(
         self, proj_id: int, *, shp_id: int, g_type: int, feat_ids: Sequence[int], feedback=None
@@ -379,11 +394,15 @@ class ApiClient:
         return self._as_list(self.call("GET", f"team/{proj_id}/list-basic"))
 
     def latest_id(self, proj_id: int, form_id: int, ques_id: int) -> int:
-        """The highest counter submitted for a unique-id question (0 when none)."""
+        """The latest-id hint of an ID question. For a schema-built id it
+        RESERVES the next number for this session (24 h; asking again returns
+        the same number until a response carrying it is saved) and replies the
+        number before it, so ``latest + 1`` is ours; for a typed ID, the stored
+        maximum. 0: nothing to number from. Ask only where a number will be used."""
         data = self.call("GET", f"data/{proj_id}/latest-id", params={"form_id": int(form_id), "ques_id": int(ques_id)})
         try:
             return int((data or {}).get("latest_value") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0
 
     def ans_create(
